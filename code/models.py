@@ -16,6 +16,11 @@ Two architectures live here because the three checkpoints come from two training
     projection alongside the classifier. Max-separation inference compares that projection against
     the split100 EC centroids in ``checkpoints/milcl_plus/centroids.npy``.
 
+``ESM2BC``
+    ``esm2_bc``, the paper's sequence-level baseline (no released checkpoint; train it with
+    ``train.py``). The MIL-BC classifier head applied to the whole-sequence ESM2 embedding alone, so
+    the comparison with ``milbc_plus`` isolates what the domain bag adds.
+
 The geometry of each checkpoint is fixed; ``load_state_dict`` runs strict, so a mismatch raises
 rather than loading silently wrong weights.
 """
@@ -107,6 +112,44 @@ class AttentionMIL(nn.Module):
         if global_feature is not None:
             bag_representation = torch.cat((bag_representation, global_feature), dim=1)
         return self.classifier(bag_representation), bag_representation
+
+
+class ESM2BC(nn.Module):
+    """ESM2-BC: the ``AttentionMIL`` classifier head on the whole-sequence ESM2 embedding alone.
+
+    ``forward`` takes the same arguments as ``AttentionMIL`` so the two are interchangeable in
+    ``infer.py`` and ``train.py``; the domain tokens and mask are ignored.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = NUM_CLASSES,
+        input_dim: int = ESM_DIM,
+        classifier_hidden_dim: int = 320,
+        dropout_rate: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(input_dim, classifier_hidden_dim),
+            nn.LayerNorm(classifier_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(classifier_hidden_dim, classifier_hidden_dim),
+            nn.LayerNorm(classifier_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(classifier_hidden_dim, num_classes),
+        )
+
+    def forward(
+        self,
+        instances_in_bag: Tensor | None = None,
+        mask: Tensor | None = None,
+        global_feature: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if global_feature is None:
+            raise ValueError("ESM2-BC needs the whole-sequence ESM2 embedding")
+        return self.classifier(global_feature), global_feature
 
 
 class GatedAttentionPooler(nn.Module):
@@ -213,6 +256,14 @@ class JointMILCL(nn.Module):
 def load_milbc(checkpoint: str, with_esm: bool, device: str = "cpu") -> AttentionMIL:
     """Rebuild ``milbc`` (``with_esm=False``) or ``milbc_plus`` (``with_esm=True``)."""
     model = AttentionMIL(global_input_dim=ESM_DIM if with_esm else 0)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    model.load_state_dict(state)
+    return model.eval().to(device)
+
+
+def load_esm2bc(checkpoint: str, device: str = "cpu") -> ESM2BC:
+    """Rebuild ``esm2_bc`` from a ``train.py`` checkpoint."""
+    model = ESM2BC()
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
     return model.eval().to(device)

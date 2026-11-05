@@ -13,10 +13,13 @@ example.csv  (Entry, EC number, Sequence)
      v
 example.npz
      |
-     |  infer.py     one of three models
+     |  infer.py     one of four models
      v
 outputs/example_<model>.csv   (Entry, predicted_ec, n_predicted [, predicted_score])
 ```
+
+`train.py` takes the same archive, built from `split100.csv`, and retrains the models, including the ESM2-BC baseline.
+See [Train](#train).
 
 ## Dataset
 
@@ -48,9 +51,32 @@ All the datasets are available at [Zenodo](https://zenodo.org/records/22598911).
 | `milbc`      | `checkpoints/milbc/model_v1.pth`      | domain embeddings only   | sigmoid ≥ 0.5            |
 | `milbc_plus` | `checkpoints/milbc_plus/model_v1.pth` | domain embeddings + ESM2 | sigmoid ≥ 0.5            |
 | `milcl_plus` | `checkpoints/milcl_plus/model_v2.pt`  | domain embeddings + ESM2 | CLEAN maximum separation |
+| `esm2_bc`    | `checkpoints/retrained/esm2_bc/model.pth` | ESM2 only            | sigmoid ≥ 0.5            |
 
 `milcl_plus` additionally needs `checkpoints/milcl_plus/centroids.npy`, the split100 EC centroids its projection is compared against;
 `infer.py` picks that up automatically from beside the checkpoint.
+
+`esm2_bc` is the paper's sequence-level baseline. It applies MIL-BC's classifier head to the
+whole-sequence ESM2 embedding alone, so comparing it with `milbc_plus` isolates what the bag of
+domains adds. The paper released no checkpoint for it; the one here was retrained (below).
+
+`checkpoints/retrained/<model>/` holds all four models retrained from scratch on split100 with
+`train.py` and the paper's settings (one run each, seed 0; `config.json` and `history.json` beside
+each checkpoint record the run). Use them exactly like the released ones, e.g.
+`--model milcl_plus --checkpoint ../checkpoints/retrained/milcl_plus/model.pt`. F1 on the six test
+sets (released checkpoints in parentheses):
+
+| Model        | New-392       | Price-149     | Uniprot25-all | Uniprot25-multi | Test-70       | Test-50       |
+| ------------ | ------------- | ------------- | ------------- | --------------- | ------------- | ------------- |
+| `milbc`      | 0.436 (0.518) | 0.303 (0.509) | 0.644 (0.696) | 0.481 (0.611)   | 0.484 (0.553) | 0.424 (0.499) |
+| `milbc_plus` | 0.524 (0.554) | 0.454 (0.530) | 0.727 (0.747) | 0.583 (0.689)   | 0.577 (0.611) | 0.509 (0.555) |
+| `milcl_plus` | 0.528 (0.541) | 0.442 (0.486) | 0.704 (0.698) | 0.544 (0.511)   | 0.562 (0.570) | 0.490 (0.511) |
+| `esm2_bc`    | 0.500 (0.504) | 0.394 (0.468) | 0.724 (0.712) | 0.595 (0.589)   | 0.572 (0.564) | 0.502 (0.481) |
+
+(`esm2_bc`'s parenthesised numbers are the paper's Tables 3–4.) The retrained `milbc` falls short of
+the released one by a consistent margin: three seeds agree within 0.02, and neither 200 epochs nor
+initialising the output bias to the class prior closes the gap, so the released model's recipe must
+differ in some detail the paper does not state.
 
 ## Install
 
@@ -121,20 +147,105 @@ python infer.py --npzdata ../example/example.npz \
                 --confscore
 ```
 
+## Train
+
+`code/train.py` retrains every released model from `split100.csv` with the paper's settings, and
+writes checkpoints that `infer.py` reads unchanged. Labels come from the `EC number` column
+(`;`-separated for multifunctional enzymes), joined to the feature archive on `Entry`. The two
+split100 sequences shorter than five residues are dropped, which leaves the paper's 227,360 enzymes.
+
+**1. Build training features.** This is the same `process.py` step as for inference:
+
+```bash
+cd code
+python process.py --csvdata ../dataset/split100.csv          # -> ../dataset/split100.npz
+```
+
+A `process.py` archive keeps every token in float64, so the full split100 archive takes about 28 GB
+of memory to load. To lower the peak, split the CSV into shards, run `process.py` on each, and pass
+all of them: `--npzdata a.npz b.npz ...`. The first time `train.py` loads an archive it writes a
+compact `<name>.compact.npz` cache beside it (about 5 GB for split100) and reads that afterwards.
+
+**2. MIL-BC, MIL-BC+ and the ESM2-BC baseline.** MIL-BC and MIL-BC+ use gated-attention MIL with
+a binary cross-entropy loss: 80 epochs, AdamW, learning rate 2e-4, weight decay 0.01, batch 512.
+ESM2-BC uses the same classifier head and the same recipe, but its only input is the ESM2 embedding.
+
+```bash
+python train.py --model milbc      --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
+python train.py --model milbc_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
+python train.py --model esm2_bc    --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
+# -> ../runs/milbc/model.pth, ../runs/milbc_plus/model.pth, ../runs/esm2_bc/model.pth
+```
+
+Expect the loss to plateau for the first few thousand steps. With 5,242 independent sigmoids, the
+model first pushes every negative logit down before it separates the classes.
+
+**3. MIL-CL+.** This model trains in two stages, as the released checkpoint was built. The first
+stage trains the fused domain + ESM2 backbone (`MILBCPlusBackbone` in `models.py`) with BCE, using the
+same settings as step 2. The second stage refines it end to end with CLEAN's SupCon-Hard
+contrastive loss: 1,500 epochs, Adam, learning rate 5e-4, temperature 0.1. Each epoch draws one
+anchor per EC, 9 positives from that EC and 30 negatives from its 100 nearest EC centroids, and the
+negatives are re-mined every 100 epochs. The classifier BCE term stays on as a joint loss
+(`--bce-weight`, 0 to disable). At the end, `centroids.npy` is written beside `model.pt` for
+max-separation inference.
+
+```bash
+python train.py --model milcl_backbone --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
+
+# optional, CLEAN's orphan-EC augmentation: 10 masked copies of every enzyme with a one-member EC
+python orphans.py --csvdata ../dataset/split100.csv          # -> ../dataset/split100_orphans.csv
+python process.py --csvdata ../dataset/split100_orphans.csv  # -> ../dataset/split100_orphans.npz
+
+python train.py --model milcl_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv \
+                --backbone ../runs/milcl_backbone/backbone.pth \
+                --augment-npz ../dataset/split100_orphans.npz
+# -> ../runs/milcl_plus/model.pt + centroids.npy
+```
+
+Without `--augment-npz`, an orphan EC's positive is the anchor itself, and dropout supplies the
+second view.
+
+**Validation and test sets.** `--num-folds 5 --fold k` holds out fold *k* of the training data for
+5-fold cross-validation. `--eval-set NPZ CSV`, which you can repeat, scores an independent test
+set during training. Both use the decision rule `infer.py` uses and CLEAN's support-weighted
+precision, recall and F1. The scores go to the log and to `history.json`.
+
+```bash
+python process.py --csvdata ../dataset/new.csv
+python train.py --model milbc_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv \
+                --eval-set ../dataset/new.npz ../dataset/new.csv --eval-every 5
+```
+
+Every hyperparameter can be overridden: `--epochs`, `--batch-size`, `--lr`, `--weight-decay`,
+`--n-pos`, `--n-neg`, `--temperature` and the rest; see `python train.py --help`. `--amp` turns on
+bfloat16 autocast. `--data-device cpu` keeps the feature tensors in host memory when the GPU is
+small. Each run also writes `config.json` and `history.json` to `--output-dir`, which defaults to
+`../runs/<model>`.
+
+```bash
+python infer.py --npzdata ../example/example.npz --model milbc_plus --checkpoint ../runs/milbc_plus/model.pth
+python infer.py --npzdata ../example/example.npz --model milcl_plus --checkpoint ../runs/milcl_plus/model.pt
+python infer.py --npzdata ../example/example.npz --model esm2_bc    --checkpoint ../runs/esm2_bc/model.pth
+```
+
 ## Files
 
 ```text
 enzyme-mil/
 ├── requirements.txt
 ├── code/
-│   ├── models.py                architectures for all three checkpoints
+│   ├── models.py                architectures for the three checkpoints + ESM2-BC
 │   ├── process.py               sequences -> feature archive
-│   └── infer.py                 feature archive -> EC calls
+│   ├── infer.py                 feature archive -> EC calls
+│   ├── train.py                 feature archive + EC labels -> checkpoints
+│   └── orphans.py               mutated copies of orphan-EC enzymes for MIL-CL+
+├── runs/                        where train.py writes
 ├── checkpoints/
 │   ├── classes.npy              the 5,242 EC numbers, in model output order
 │   ├── milbc/model_v1.pth
 │   ├── milbc_plus/model_v1.pth
-│   └── milcl_plus/model_v2.pt + centroids.npy
+│   ├── milcl_plus/model_v2.pt + centroids.npy
+│   └── retrained/               the four models retrained on split100 with train.py
 ├── DCTdomain/                   cloned from https://github.com/mgtools/DCTdomain;
 │                                compile src/RecCut before first use
 ├── example/

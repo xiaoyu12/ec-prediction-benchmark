@@ -8,9 +8,10 @@ Writes ``../outputs/example_milbc_plus.csv`` -- the archive's stem and the model
 ``--output`` says otherwise. Predictions come from a fixed vocabulary of 5,242 EC numbers learned
 from split100, so an enzyme whose true EC is outside that vocabulary can never be called correctly.
 
-Three models:
+Four models:
 ``milbc``       domain embeddings only, sigmoid >= 0.5
 ``milbc_plus``  domain embeddings + whole-sequence ESM2, sigmoid >= 0.5
+``esm2_bc``     whole-sequence ESM2 only (the paper's baseline; train it with train.py), sigmoid >= 0.5
 ``milcl_plus``  end-to-end contrastive model, CLEAN maximum separation
 """
 
@@ -23,12 +24,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from models import NUM_CLASSES, load_milbc, load_milcl
+from models import NUM_CLASSES, load_esm2bc, load_milbc, load_milcl
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 MODELS = {
     "milbc": {"family": "milbc", "esm": False, "rule": "sigmoid"},
     "milbc_plus": {"family": "milbc", "esm": True, "rule": "sigmoid"},
+    "esm2_bc": {"family": "esm2bc", "esm": True, "rule": "sigmoid"},
     "milcl_plus": {"family": "milcl", "esm": True, "rule": "maxsep"},
 }
 
@@ -206,7 +208,7 @@ def write_predictions(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--npzdata", required=True, help="feature archive from process.py")
-    parser.add_argument("--model", required=True, choices=sorted(MODELS), help="which released model to run")
+    parser.add_argument("--model", required=True, choices=sorted(MODELS), help="which model to run")
     parser.add_argument("--checkpoint", required=True, help="weights for --model")
     parser.add_argument("--centroids", help="EC centroids for milcl_plus (default: beside its checkpoint)")
     parser.add_argument("--classes", default=str(PACKAGE_ROOT / "checkpoints" / "classes.npy"), help="EC vocabulary")
@@ -239,9 +241,13 @@ def main() -> int:
         device = "cpu"
 
     entries, domains, masks, esm2 = load_features(npz_path)
-    if spec["family"] == "milbc":
-        # These checkpoints predate the seventeenth whole-protein token: drop it.
-        model = load_milbc(str(checkpoint), spec["esm"], device)
+    if spec["family"] in {"milbc", "esm2bc"}:
+        # These checkpoints predate the seventeenth whole-protein token: drop it. (ESM2-BC reads
+        # only the ESM2 embedding and ignores the tokens altogether.)
+        if spec["family"] == "esm2bc":
+            model = load_esm2bc(str(checkpoint), device)
+        else:
+            model = load_milbc(str(checkpoint), spec["esm"], device)
         logits = score_sigmoid(model, domains[:, :-1, :], masks[:, :-1], esm2, spec["esm"], device, args.batch_size)
         calls = call_ec(logits)
         scores = sigmoid_confidence(logits, calls) if args.confscore else None

@@ -1,0 +1,73 @@
+{
+  "model": "esm2_bc",
+  "npzdata": [
+    "../features/shards/split100_00.npz",
+    "../features/shards/split100_01.npz",
+    "../features/shards/split100_02.npz",
+    "../features/shards/split100_03.npz",
+    "../features/shards/split100_04.npz",
+    "../features/shards/split100_05.npz",
+    "../features/shards/split100_06.npz",
+    "../features/shards/split100_07.npz",
+    "../features/shards/split100_08.npz",
+    "../features/shards/split100_09.npz",
+    "../features/shards/split100_10.npz",
+    "../features/shards/split100_11.npz",
+    "../features/shards/split100_12.npz",
+    "../features/shards/split100_13.npz",
+    "../features/shards/split100_14.npz",
+    "../features/shards/split100_15.npz"
+  ],
+  "csvdata": "../features/split100_min5.csv",
+  "classes": "/mnt/d/workspace/enzyme-sae/checkpoints/classes.npy",
+  "output_dir": "/mnt/d/workspace/enzyme-sae/runs/esm2_bc",
+  "eval_set": [
+    [
+      "../features/tests/new.npz",
+      "../features/tests/new.csv"
+    ],
+    [
+      "../features/tests/price.npz",
+      "../features/tests/price.csv"
+    ],
+    [
+      "../features/tests/uniprot-all.npz",
+      "../features/tests/uniprot-all.csv"
+    ],
+    [
+      "../features/tests/uniprot-multi.npz",
+      "../features/tests/uniprot-multi.csv"
+    ],
+    [
+      "../features/tests/test70.npz",
+      "../features/tests/test70.csv"
+    ],
+    [
+      "../features/tests/test50.npz",
+      "../features/tests/test50.csv"
+    ]
+  ],
+  "num_folds": 0,
+  "fold": 0,
+  "epochs": 80,
+  "batch_size": 512,
+  "lr": 0.0002,
+  "weight_decay": 0.01,
+  "seed": 0,
+  "device": "cuda:0",
+  "data_device": "cuda:0",
+  "amp": false,
+  "eval_every": 5,
+  "eval_batch_size": 2048,
+  "log_every": 1,
+  "no_cache": false,
+  "backbone": null,
+  "augment_npz": [],
+  "n_pos": 9,
+  "n_neg": 30,
+  "neg_knn": 100,
+  "mine_every": 100,
+  "temperature": 0.1,
+  "bce_weight": 1.0,
+  "save_every": 0
+}
