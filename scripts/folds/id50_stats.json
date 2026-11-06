@@ -1,0 +1,24 @@
+{
+  "csvdata": "/home/xiaoyut1/workspace/enzyme-sae/features/split100_min5.csv",
+  "min_seq_id": 0.5,
+  "coverage": 0.8,
+  "search_cov": 0.5,
+  "fraction": 0.1,
+  "seed": 0,
+  "clusters": 32291,
+  "validation": 10422,
+  "excluded_leaks": 12380,
+  "training": 204558,
+  "validation_multi_label": 399,
+  "validation_ecs": 1109,
+  "validation_by_training_class_size": {
+    "1-1": 209,
+    "2-2": 414,
+    "3-5": 359,
+    "6-10": 409,
+    "11-30": 681,
+    "31-100": 2073,
+    "101-1000": 5516,
+    "1001-999999999": 761
+  }
+}

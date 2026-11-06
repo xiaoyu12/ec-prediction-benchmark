@@ -27,14 +27,14 @@ added (MIL-BC+), and absent for ESM2 alone (ESM2-BC).
 
 - **Features, labels, metric, decision rule.** The released checkpoints scored on the rebuilt test
   features reproduce the paper's tables to ±0.001, and the released MIL-BC gets 0.998 top-1 on our
-  split100 training features (`features/debug/trainloss.py`), so the training features and the
+  split100 training features (`scripts/debug/trainloss.py`), so the training features and the
   label order (`checkpoints/classes.npy`) are compatible with it.
 - **Train/test feature mismatch.** Token counts and value distributions of training and test
   domain tokens look alike (about 3 vs 3.6 tokens per protein; |x| mean 0.49, std 0.22 in both).
 - **Seed noise.** Seeds 0, 1, 2 give Test-70 F1 0.484, 0.501, 0.481 (`runs/variants/milbc_seed*`).
 - **Too few epochs.** 200 epochs: Test-70 ~0.50, flat after epoch 100 (`runs/variants/milbc_e200`).
 - **The ~15-epoch plateau at the start.** All 5,242 sigmoids start at 0.5; initialising the output
-  bias to -log(5242) (`features/debug/prior_bias.py`) removes the plateau but converges to the same
+  bias to -log(5242) (`scripts/debug/prior_bias.py`) removes the plateau but converges to the same
   Test-70 0.509 (`runs/variants/milbc_prior`).
 - **Underfitting.** Retrained training BCE 1.57e-5, top-1 0.993 vs released 1.69e-5, 0.998.
 - **Architecture.** State-dict keys and shapes are identical; `infer.py` loads both the same way.
@@ -79,7 +79,7 @@ python train.py --model milbc --npzdata $F/shards/split100_[0-9][0-9].npz \
 `train.py` reads the shards through their `.compact.npz` caches; when only a cache is present it
 is used directly, so the 28 GB `split100_NN.npz` originals are not needed. Data loading takes
 about 1 min; an 80-epoch MIL-BC run takes 3–5 min on a 3090 (~7 GB VRAM, ~28 GB RAM).
-`python ../features/score.py label=milbc:<checkpoint>` re-scores a checkpoint through `infer.py`.
+`python ../scripts/score.py label=milbc:<checkpoint>` re-scores a checkpoint through `infer.py`.
 
 ## Files
 
@@ -88,7 +88,7 @@ about 1 min; an 80-epoch MIL-BC run takes 3–5 min on a 3090 (~7 GB VRAM, ~28 G
 - `features/tests/<name>.{npz,compact.npz,csv}`: the six test sets.
 - `features/logs/train_*.log`, `features/logs/variant_*.log`: every run's epoch-by-epoch F1.
 - `runs/<model>/`, `runs/variants/*/`: checkpoints, `config.json`, `history.json`.
-- `features/debug/`: `trainloss.py` (training-set BCE/top-1 of released vs retrained) and
+- `scripts/debug/`: `trainloss.py` (training-set BCE/top-1 of released vs retrained) and
   `prior_bias.py` (train.py wrapper with the prior-initialised output bias).
 
 ---
@@ -97,7 +97,7 @@ about 1 min; an 80-epoch MIL-BC run takes 3–5 min on a 3090 (~7 GB VRAM, ~28 G
 
 Environment: `uv sync` (pyproject.toml now holds requirements.txt; torch 2.15 + CUDA 13.2). No
 `PYTORCH_CUDA_ALLOC_CONF` workaround needed here. Only the `.compact.npz` caches are present, so
-pass shard paths explicitly (`features/sweep_milbc.sh` / `full_milbc.sh` do this). Upstream
+pass shard paths explicitly (`scripts/sweep_milbc.sh` / `full_milbc.sh` do this). Upstream
 github.com/omics-ai/enzyme-mil still has no training code or hyperparameters (checked today).
 
 ## Newly ruled out
@@ -111,11 +111,11 @@ github.com/omics-ai/enzyme-mil still has no training code or hyperparameters (ch
 - **Softmax CE instead of BCE.** (The paper writes the head as `softmax` with loss `-Σ Y log Ŷ`.)
   Released logits are BCE-shaped (negatives ≈ -27…-30, MIL-BC+ output bias drifted -0.021 like ours).
 - **Different training labels.** Released MIL-BC and MIL-BC+ don't share "wrong" training
-  predictions any more than released/retrained pairs do (`features/debug/agree.py`).
+  predictions any more than released/retrained pairs do (`scripts/debug/agree.py`).
 
 ## Found: the released models were trained WITHOUT the padding mask
 
-`features/debug/maskprobe.py` scores with and without the attention mask:
+`scripts/debug/maskprobe.py` scores with and without the attention mask:
 
 | Test-70 F1          | mask  | no mask |
 | ------------------- | ----- | ------- |
@@ -137,26 +137,26 @@ for fidelity.
 - **Fold-0 F1 can't tell the variants apart** (all 0.946–0.949). The gap only shows on the
   out-of-distribution test sets, so a validation proxy closer to them is needed, e.g. a
   sequence-identity-clustered held-out fold (MMseqs2 at 50 %, as Test-50 was built).
-- **Rare-class fit** (`features/debug/freqdiag.py`, training top-1 by EC class size 1 / 2 / 3–5):
+- **Rare-class fit** (`scripts/debug/freqdiag.py`, training top-1 by EC class size 1 / 2 / 3–5):
   released MIL-BC 0.94 / 0.95 / 0.97 vs retrained 0.76 / 0.85 / 0.92. Its output-row norms are also
   flatter across class sizes. Candidates: class-balanced / oversampled training, or many more
   epochs at the end. Inconsistency: released MIL-BC+ fits rare classes *worse* than the retrained one
   (0.83 vs 0.90) yet generalises better, so the two released models may not share one recipe.
 - The gap is largest on Price-149 (rare ECs) for every retrained model.
 
-Diagnostics in `features/debug/` (`maskprobe.py`, `freqdiag.py`, `agree.py`, `logitstats.py`) use
-relative paths: run them from `code/`.
+Diagnostics in `scripts/debug/` (`maskprobe.py`, `freqdiag.py`, `agree.py`, `logitstats.py`) run
+from any directory.
 
-## Identity-clustered validation fold (`features/folds/id50_*`)
+## Identity-clustered validation fold (`scripts/folds/id50_*`)
 
-`features/make_cluster_fold.py` (MMseqs2 18.8cc5c, installed at `~/.local/opt/mmseqs2`):
+`scripts/make_cluster_fold.py` (MMseqs2 18.8cc5c, installed at `~/.local/opt/mmseqs2`):
 easy-cluster split100 at 50 % identity, `-c 0.8` → 32,291 clusters; whole clusters go to
 validation in random order (seed 0) until 10 %, skipping clusters whose removal would leave an EC
 untrainable; then `easy-search` validation vs training (≥50 % id, ≥50 % coverage, `-s 7.5`) and
 drop every validation enzyme with a hit. 12,380 of 22,802 picked enzymes leaked past clustering and
 are excluded from both sides. Result: 10,422 validation enzymes, 1,109 ECs, 399 multi-label;
-204,558 training enzymes. Use `train.py --val-entries features/folds/id50_val.txt
---exclude-entries features/folds/id50_exclude.txt` (or `features/id50_train.sh <name> [args]`).
+204,558 training enzymes. Use `train.py --val-entries scripts/folds/id50_val.txt
+--exclude-entries scripts/folds/id50_exclude.txt` (or `scripts/id50_train.sh <name> [args]`).
 
 Proxy check, paper settings, epoch 80 (`runs/id50/`, `features/logs/id50_*.log`):
 
@@ -203,7 +203,7 @@ Kaiming-normal initialised (and, from above, trained without the padding mask). 
 
 The 1.6× weight-norm "lead" is fully explained by init and is not the cause of the gap.
 
-Leakage probe (`features/debug/memprobe.py`): share of test enzymes predicted correctly with a
+Leakage probe (`scripts/debug/memprobe.py`): share of test enzymes predicted correctly with a
 train-like top logit (>10). Released MIL-BC+ is *not* more train-confident than retrained MIL-BC+
 (e.g. Uniprot-all 18.2 % vs 25.2 %), so no sign the released models saw test enzymes. Released
 MIL-BC does sit at higher logits overall (mean top logit on Price 3.5 vs ~1.1 for every retrained
@@ -216,7 +216,7 @@ sampling, padding mask, initialisation, test leakage. Untested ideas: instance-l
 normalisation of the DCT tokens, and decomposing the F1 gap into top-1 accuracy vs the multi-label
 threshold (calibration).
 
-## Step 1 result: the gap is mostly calibration × the metric (`features/debug/{gapsplit,threshold}.py`)
+## Step 1 result: the gap is mostly calibration × the metric (`scripts/debug/{gapsplit,threshold}.py`)
 
 Ranking vs calling, Test-70 (all sets in the script output):
 
@@ -240,7 +240,7 @@ Open: why released logits sit higher (earlier checkpoint? loss detail?); pick th
 id50 fold for a clean number; re-score everything with a metric that charges false positives
 (micro / per-sample F1) to check the paper's ordering; the residual MIL-BC ranking gap.
 
-## Why do released logits sit higher? (`features/debug/calib.py`, Test-70)
+## Why do released logits sit higher? (`scripts/debug/calib.py`, Test-70)
 
 Released MIL-BC / MIL-BC+: 1.27 / 1.40 calls per enzyme, 0.80 / 0.85 of enzymes with any logit ≥ 0,
 2nd-best logit −2.9 / −2.0, top logit 4.5 / 4.2. **All 30+ retrained checkpoints** sit at
@@ -278,7 +278,7 @@ on the validation set only: max support-weighted F1 over 0…8 in steps of 0.25,
 
 Chosen on `runs/id50/<model>` and copied to `checkpoints/retrained/<model>/calibration.json`:
 MIL-BC +3.5, MIL-BC+ +5.0, ESM2-BC +5.0 (id50 calls/enzyme 1.05 → 1.39–1.45). Full-data retrained
-checkpoints through `features/score.py` (i.e. infer.py with the sidecar):
+checkpoints through `scripts/score.py` (i.e. infer.py with the sidecar):
 
 | F1                     | New   | Price | U-all | U-multi | Test-70 | Test-50 |
 | ---------------------- | ----- | ----- | ----- | ------- | ------- | ------- |
@@ -292,7 +292,7 @@ With a validation-chosen shift the retrained models match or beat the released o
 shifted ESM2-BC is level with MIL-BC+ — the paper's MIL-vs-ESM2 margin is largely a calibration
 effect under this metric (see "Step 1 result").
 
-## Metrics that charge false positives (`features/compare_metrics.py` → `logs/compare_metrics.json`)
+## Metrics that charge false positives (`scripts/compare_metrics.py` → `logs/compare_metrics.json`)
 
 New in `train.py`: `micro_prf` (pooled over all enzyme–EC decisions) and `sample_prf` (per-enzyme
 P/R/F1 averaged over enzymes, protein-centric as in CAFA). Fmax = best per-enzyme F1 over shifts
@@ -328,7 +328,7 @@ Per-enzyme F1 (shift 0 = paper's rule):
   `features/logs/calibrate_*.log`.
 - `train.py --select-shift` / `calibrate.py` take `--shift-criterion {sample,micro,weighted}`,
   default `sample` (per-enzyme F1). On id50 that picks shift 0 for all three retrained models.
-- `features/bootstrap_ci.py` → `logs/bootstrap_ci.json`: paired bootstrap over enzymes (2,000
+- `scripts/bootstrap_ci.py` → `logs/bootstrap_ci.json`: paired bootstrap over enzymes (2,000
   resamples, seed 0), every model scored on the same draws; 95 % percentile CIs for each score and
   for paired differences. Note Test-70/Test-50 are drawn from the union of the other three sets,
   so the six sets are not independent.
@@ -353,3 +353,9 @@ Under the weighted F1 the same comparisons flip: released MIL-BC+ beats ESM2-BC 
    ESM2-BC beats domain-only MIL-BC on 4/6 and MIL-BC+ on U-all. The paper's MIL > ESM2 result
    depends on the support-weighted F1.
 3. Adding ESM2 to the domain bag (MIL-BC → MIL-BC+) helps significantly on 4/6 sets.
+
+## Layout
+
+Scripts and the id50 fold lists now live in tracked `scripts/` (`scripts/debug/`,
+`scripts/folds/`); feature data, logs and run outputs stay in the gitignored `features/` and
+`runs/`. Shell scripts `cd` into `code/` themselves; the Python scripts run from any directory.

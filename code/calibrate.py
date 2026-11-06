@@ -3,7 +3,7 @@
 
     python calibrate.py --model milbc_plus --checkpoint ../runs/id50/milbc_plus/model.pth \\
         --npzdata ../features/shards/split100_{00..15}.npz --csvdata ../features/split100_min5.csv \\
-        --val-entries ../features/folds/id50_val.txt \\
+        --val-entries ../scripts/folds/id50_val.txt \\
         --eval-set ../features/tests/test70.npz ../features/tests/test70.csv \\
         --apply-to ../checkpoints/retrained/milbc_plus
 

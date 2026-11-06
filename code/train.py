@@ -939,7 +939,7 @@ def main() -> int:
         eval_sets[args.validation_set] = (store, subset(train_set, held_out))
         train_set = subset(train_set, keep)
     if args.val_entries:
-        # A fixed held-out list, e.g. features/make_cluster_fold.py's identity-clustered fold; the
+        # A fixed held-out list, e.g. scripts/make_cluster_fold.py's identity-clustered fold; the
         # exclude list (its leak-filtered enzymes) is dropped from training and validation alike.
         val_path = Path(args.val_entries).expanduser().resolve()
         held = set(val_path.read_text().split())
