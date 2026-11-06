@@ -1,0 +1,16 @@
+[project]
+name = "enzyme-sae"
+version = "0.1.0"
+description = "Enzyme MIL / SAE models on ESM embeddings"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fair-esm>=2.0",
+    "faiss-cpu>=1.15.1",
+    "numpy>=2.4.6",
+    "scipy>=1.17.1",
+    "torch>=2.0",
+]
+
+[tool.uv]
+package = false

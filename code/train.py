@@ -322,6 +322,34 @@ def weighted_prf(true_ecs: list[list[str]], predicted: list[list[str]]) -> dict[
     }
 
 
+def micro_prf(true_ecs: list[list[str]], predicted: list[list[str]]) -> dict[str, float]:
+    """Precision, recall and F1 pooled over every (enzyme, EC) decision: each wrong call and each miss
+    counts once, whichever EC it names (unlike ``weighted_prf``, where a call of an EC absent from the
+    set's truth carries zero weight)."""
+    tp = sum(len(set(t) & set(p)) for t, p in zip(true_ecs, predicted))
+    called = sum(len(set(p)) for p in predicted)
+    support = sum(len(set(t)) for t in true_ecs)
+    precision = tp / called if called else 0.0
+    recall = tp / support if support else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def sample_prf(true_ecs: list[list[str]], predicted: list[list[str]]) -> dict[str, float]:
+    """Per-enzyme precision, recall and F1, averaged over enzymes (protein-centric, as in CAFA)."""
+    precision = recall = f1 = 0.0
+    for t, p in zip(true_ecs, predicted):
+        t, p = set(t), set(p)
+        hit = len(t & p)
+        pr = hit / len(p) if p else 0.0
+        rc = hit / len(t) if t else 0.0
+        precision += pr
+        recall += rc
+        f1 += 2 * pr * rc / (pr + rc) if pr + rc else 0.0
+    n = max(1, len(true_ecs))
+    return {"precision": precision / n, "recall": recall / n, "f1": f1 / n}
+
+
 def calls_to_ecs(calls: np.ndarray, classes: np.ndarray) -> list[list[str]]:
     return [list(classes[row]) for row in calls]
 
@@ -341,6 +369,24 @@ def build_model(name: str) -> nn.Module:
     if name == "milcl_backbone":
         return MILBCPlusBackbone()
     return JointMILCL()
+
+
+def reinit_linear_weights(model: nn.Module, scheme: str) -> None:
+    """Re-draw every Linear weight (biases keep PyTorch's default) with ``scheme``."""
+    if scheme == "default":
+        return
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            if scheme == "kaiming_normal":
+                nn.init.kaiming_normal_(module.weight, mode="fan_in", nonlinearity="relu")
+            elif scheme == "kaiming_uniform":
+                nn.init.kaiming_uniform_(module.weight, mode="fan_in", nonlinearity="relu")
+            elif scheme == "xavier_normal":
+                nn.init.xavier_normal_(module.weight)
+            elif scheme == "xavier_uniform":
+                nn.init.xavier_uniform_(module.weight)
+            else:
+                raise ValueError(scheme)
 
 
 def classifier_logits(model: nn.Module, name: str, domains: Tensor, masks: Tensor, esm2: Tensor) -> Tensor:
@@ -412,9 +458,58 @@ def evaluate(model, name, store, eval_sets, train_set, classes, args) -> dict[st
             calls, _ = apply_max_separation(projection.cpu().numpy(), centroids)
         else:
             logits = predict_logits(model, name, set_store, data.rows, args.device, args.eval_batch_size, args.amp)
-            calls = call_ec(logits)
+            calls = call_ec(logits, args.logit_shift)
         results[set_name] = weighted_prf(data.true_ecs, calls_to_ecs(calls, classes))
     return results
+
+
+SHIFT_GRID = [round(0.25 * k, 2) for k in range(0, 33)]  # 0 .. 8 logits
+SHIFT_CRITERIA = {"sample": sample_prf, "micro": micro_prf, "weighted": weighted_prf}
+
+
+def select_logit_shift(model, name, eval_sets, classes, args) -> float:
+    """Pick the logit shift that maximises F1 on the validation set and write ``calibration.json``.
+
+    ``args.shift_criterion`` names the F1: ``sample`` (per-enzyme, default), ``micro``, or ``weighted``
+    (CLEAN's support-weighted F1, which does not charge calls of ECs absent from the set's truth and
+    so favours large shifts).
+
+    Only the validation set (``--num-folds`` fold or ``--val-entries``) is used to choose; the other
+    eval sets are scored afterwards at the chosen shift, for information. Ties go to the smaller
+    shift. ``infer.py`` reads the file from beside ``model.pth``.
+    """
+    criterion = getattr(args, "shift_criterion", "sample")
+    metric = SHIFT_CRITERIA[criterion]
+    store, data = eval_sets[args.validation_set]
+    logits = predict_logits(model, name, store, data.rows, args.device, args.eval_batch_size, args.amp)
+    curve = []
+    for shift in SHIFT_GRID:
+        calls = call_ec(logits, shift)
+        metrics = metric(data.true_ecs, calls_to_ecs(calls, classes))
+        curve.append({"shift": shift, "calls_per_enzyme": float(calls.sum(1).mean()), **metrics})
+    best = max(curve, key=lambda point: (round(point["f1"], 4), -point["shift"]))
+    shift = best["shift"]
+    others = {}
+    for set_name, (set_store, set_data) in eval_sets.items():
+        if set_name == args.validation_set:
+            continue
+        set_logits = predict_logits(model, name, set_store, set_data.rows, args.device, args.eval_batch_size, args.amp)
+        others[set_name] = {
+            str(s): metric(set_data.true_ecs, calls_to_ecs(call_ec(set_logits, s), classes)) for s in (0.0, shift)
+        }
+    payload = {
+        "logit_shift": shift,
+        "selected_on": args.validation_set,
+        "criterion": f"max {criterion} F1 on the validation set (ties -> smaller shift)",
+        "validation_curve": curve,
+        "eval_sets_at_0_and_selected": others,
+    }
+    (args.output_dir / "calibration.json").write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"logit shift {shift:+.2f} selected on {args.validation_set} by {criterion} F1: F1 {curve[0]['f1']:.3f} -> {best['f1']:.3f}, "
+          f"calls/enzyme {curve[0]['calls_per_enzyme']:.2f} -> {best['calls_per_enzyme']:.2f}", flush=True)
+    for set_name, by_shift in others.items():
+        print(f"  {set_name}: F1 {by_shift['0.0']['f1']:.3f} -> {by_shift[str(shift)]['f1']:.3f}", flush=True)
+    return shift
 
 
 def format_metrics(results: dict[str, dict[str, float]]) -> str:
@@ -428,30 +523,55 @@ def format_metrics(results: dict[str, dict[str, float]]) -> str:
 # --------------------------------------------------------------------------------------------
 
 
+SAMPLING_POWER = {"uniform": 0.0, "sqrt": 0.5, "balanced": 1.0}
+
+
+def sampling_weights(classes: list[list[int]], mode: str) -> Tensor | None:
+    """Per-enzyme draw weights: the mean over its ECs of ``count(EC) ** -power``; None for uniform."""
+    power = SAMPLING_POWER[mode]
+    if power == 0.0:
+        return None
+    counts = np.bincount([k for c in classes for k in c], minlength=NUM_CLASSES).astype(np.float64)
+    per_class = np.zeros(NUM_CLASSES)
+    per_class[counts > 0] = counts[counts > 0] ** -power
+    return torch.tensor([per_class[c].mean() for c in classes], dtype=torch.float64)
+
+
 def train_bce(model, name, store, train_set, eval_sets, classes, args, history) -> None:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, eps=args.adam_eps)
     loss_fn = nn.BCEWithLogitsLoss()
     table = padded_labels(train_set.classes).to(args.device)
     rows = torch.from_numpy(train_set.rows)
     local_only = name in {"milbc", "milbc_plus", "esm2_bc"}
     device_type = args.device.split(":")[0]
     steps = math.ceil(len(rows) / args.batch_size)
+    weights = sampling_weights(train_set.classes, args.sampling)
     for epoch in range(1, args.epochs + 1):
         model.train()
         started = time.time()
-        order = torch.randperm(len(rows))
+        if weights is None:
+            order = torch.randperm(len(rows))
+        else:  # same number of draws per epoch, with replacement, rarer ECs more often
+            order = torch.multinomial(weights, len(rows), replacement=True)
         total = 0.0
         for step in range(steps):
             positions = order[step * args.batch_size : (step + 1) * args.batch_size]
             d, m, e = fetch(store, rows[positions], args.device, local_only)
             target = multi_hot(table[positions.to(args.device)])
+            if not args.train_mask and name in {"milbc", "milbc_plus"}:
+                m = None  # padding slots join the attention softmax, as in the released checkpoints
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=args.amp):
                 logits = classifier_logits(model, name, d, m, e)
             loss = loss_fn(logits.float(), target)
+            if args.bce_reduction == "sum":
+                # the paper's L = -1/N sum_i sum_c ...: sum over classes, mean over enzymes. Same
+                # direction as the element mean but NUM_CLASSES times larger, which keeps the
+                # gradients of rarely-seen output rows well above Adam's eps.
+                loss = loss * NUM_CLASSES
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            total += loss.item()
+            total += loss.item() / (NUM_CLASSES if args.bce_reduction == "sum" else 1)
         record = {"epoch": epoch, "loss": total / steps, "seconds": round(time.time() - started, 1)}
         if eval_sets and (epoch % args.eval_every == 0 or epoch == args.epochs):
             record["eval"] = evaluate(model, name, store, eval_sets, train_set, classes, args)
@@ -720,6 +840,8 @@ def parse_args() -> argparse.Namespace:
                         help="independent test set to score while training; repeatable")
     parser.add_argument("--num-folds", type=int, default=0, help="split the training data into this many folds")
     parser.add_argument("--fold", type=int, default=0, help="fold held out for validation when --num-folds > 1")
+    parser.add_argument("--val-entries", help="file of Entry ids to hold out as a validation set")
+    parser.add_argument("--exclude-entries", help="file of Entry ids to drop from training (with --val-entries)")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int, help="enzymes per step (anchors per step for milcl_plus)")
     parser.add_argument("--lr", type=float)
@@ -732,6 +854,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batch-size", type=int, default=2048)
     parser.add_argument("--log-every", type=int, help="epochs between log lines (default: 1, or 10 for milcl_plus)")
     parser.add_argument("--no-cache", action="store_true", help="do not read or write <archive>.compact.npz")
+    parser.add_argument("--init", default="default",
+                        choices=["default", "kaiming_normal", "kaiming_uniform", "xavier_normal", "xavier_uniform"],
+                        help="Linear weight initialisation (biases keep PyTorch's default)")
+    parser.add_argument("--bce-reduction", choices=["mean", "sum"], default="mean",
+                        help="BCE models: mean over every (enzyme, EC) element, or the paper's sum over ECs "
+                             "and mean over enzymes (5,242x larger; matters through Adam's eps)")
+    parser.add_argument("--logit-shift", type=float, default=0.0,
+                        help="sigmoid models: evaluate with sigmoid(logit + shift) >= 0.5 (0 = the paper's rule)")
+    parser.add_argument("--shift-criterion", choices=sorted(SHIFT_CRITERIA), default="sample",
+                        help="F1 that --select-shift maximises: per-enzyme (sample), micro, or support-weighted")
+    parser.add_argument("--select-shift", action="store_true",
+                        help="after training, choose the logit shift on the validation set and write calibration.json")
+    parser.add_argument("--dropout", type=float, help="override every Dropout probability (default: the model's own)")
+    parser.add_argument("--adam-eps", type=float, default=1e-8, help="AdamW eps for the BCE models")
+    parser.add_argument("--sampling", choices=sorted(SAMPLING_POWER), default="uniform",
+                        help="BCE models: draw enzymes uniformly, or by EC count^-0.5 (sqrt) / ^-1 (balanced)")
+    parser.add_argument("--train-mask", choices=["on", "off"], default="on",
+                        help="milbc/milbc_plus: mask padding slots out of attention while training "
+                             "('off' lets them in, as the released checkpoints were; evaluation always masks)")
 
     contrastive = parser.add_argument_group("milcl_plus")
     contrastive.add_argument("--backbone", help="backbone.pth from a milcl_backbone run (required)")
@@ -748,6 +889,7 @@ def parse_args() -> argparse.Namespace:
     for key, value in PAPER_DEFAULTS[args.model].items():
         if getattr(args, key) is None:
             setattr(args, key, value)
+    args.train_mask = args.train_mask == "on"
     contrastive_run = args.model == "milcl_plus"
     args.eval_every = args.eval_every or (50 if contrastive_run else 5)
     args.log_every = args.log_every or (10 if contrastive_run else 1)
@@ -760,6 +902,15 @@ def parse_args() -> argparse.Namespace:
         args.amp = False
     if args.num_folds == 1 or args.num_folds < 0 or (args.num_folds and not 0 <= args.fold < args.num_folds):
         parser.error("--num-folds must be 0 or at least 2, and --fold in [0, num_folds)")
+    if args.val_entries and args.num_folds:
+        parser.error("use either --num-folds or --val-entries, not both")
+    if args.exclude_entries and not args.val_entries:
+        parser.error("--exclude-entries goes with --val-entries")
+    args.validation_set = None
+    if args.select_shift and not (args.num_folds or args.val_entries):
+        parser.error("--select-shift needs a validation set: --val-entries or --num-folds")
+    if args.select_shift and args.model not in {"milbc", "milbc_plus", "esm2_bc"}:
+        parser.error("--select-shift applies to the sigmoid models: milbc, milbc_plus, esm2_bc")
     if contrastive_run and not args.backbone:
         parser.error("milcl_plus starts from a BCE-trained backbone: train --model milcl_backbone, then pass --backbone")
     if not contrastive_run and args.augment_npz:
@@ -784,8 +935,24 @@ def main() -> int:
     eval_sets: dict[str, tuple[Features, LabelledSet]] = {}
     if args.num_folds:
         keep, held_out = fold_split(len(train_set.rows), args.num_folds, args.fold, args.seed)
-        eval_sets[f"fold{args.fold}"] = (store, subset(train_set, held_out))
+        args.validation_set = f"fold{args.fold}"
+        eval_sets[args.validation_set] = (store, subset(train_set, held_out))
         train_set = subset(train_set, keep)
+    if args.val_entries:
+        # A fixed held-out list, e.g. features/make_cluster_fold.py's identity-clustered fold; the
+        # exclude list (its leak-filtered enzymes) is dropped from training and validation alike.
+        val_path = Path(args.val_entries).expanduser().resolve()
+        held = set(val_path.read_text().split())
+        dropped = set(Path(args.exclude_entries).expanduser().resolve().read_text().split()) if args.exclude_entries else set()
+        entry_of = [store.entries[row] for row in train_set.rows]
+        val_positions = np.array([i for i, e in enumerate(entry_of) if e in held], dtype=np.int64)
+        keep = np.array([i for i, e in enumerate(entry_of) if e not in held and e not in dropped], dtype=np.int64)
+        if len(val_positions) != len(held):
+            raise SystemExit(f"{val_path}: {len(held) - len(val_positions)} entries are not in the training data")
+        args.validation_set = val_path.stem.removesuffix("_val") or "valid"
+        eval_sets[args.validation_set] = (store, subset(train_set, val_positions))
+        train_set = subset(train_set, keep)
+        print(f"held out {len(val_positions)} enzymes from {val_path.name}; excluded {len(dropped)}", flush=True)
     augment: dict[int, np.ndarray] = {}
     if args.augment_npz:
         augmented = load_archives([Path(p).expanduser().resolve() for p in args.augment_npz], use_cache)
@@ -804,7 +971,14 @@ def main() -> int:
                              npz_path.stem, training=False)
         eval_sets[npz_path.stem] = (eval_store, data)
 
-    model = build_model(args.model).to(args.device)
+    model = build_model(args.model)
+    if args.model != "milcl_plus":
+        reinit_linear_weights(model, args.init)
+    if args.dropout is not None:  # training-only: no parameters change, so checkpoints load as before
+        for module in model.modules():
+            if isinstance(module, nn.Dropout):
+                module.p = args.dropout
+    model = model.to(args.device)
     if args.model == "milcl_plus":
         state = torch.load(Path(args.backbone).expanduser().resolve(), map_location="cpu", weights_only=True)
         model.backbone.load_state_dict(state)
@@ -840,6 +1014,9 @@ def main() -> int:
         name = "backbone.pth" if args.model == "milcl_backbone" else "model.pth"
         torch.save({k: v.detach().cpu() for k, v in model.state_dict().items()}, args.output_dir / name)
         written = [name]
+        if args.select_shift:
+            select_logit_shift(model, args.model, eval_sets, classes, args)
+            written.append("calibration.json")
     (args.output_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
     print(f"wrote {', '.join(str(args.output_dir / name) for name in written)}")
     return 0

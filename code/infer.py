@@ -109,15 +109,19 @@ def score_projection(model, domains, masks, esm2, device: str, batch_size: int) 
     return np.concatenate(chunks)
 
 
-def call_ec(logits: np.ndarray) -> np.ndarray:
-    """EC calls at ``sigmoid >= 0.5``, then apply the refinement.
+def call_ec(logits: np.ndarray, shift: float = 0.0) -> np.ndarray:
+    """EC calls at ``sigmoid(logit + shift) >= 0.5``, then apply the refinement.
+
+    ``shift`` (default 0, the paper's rule) moves every logit before the cut, i.e. calls ECs with
+    ``logit >= -shift``; a positive shift calls more ECs. The at-least-one-label fallback and the
+    cap of five depend only on the ranking, which a shift does not change.
 
     Ranking uses the logits rather than their sigmoids because ``sigmoid`` saturates to 1.0 in
     float32 above a logit of roughly 17, which would turn distinct scores into ties. The two
     orderings are otherwise identical, sigmoid being strictly increasing.
     """
     scores = torch.from_numpy(logits)
-    calls = scores >= 0.0
+    calls = scores >= -shift
     over_cap = calls.sum(dim=1) > 5
 
     uncalled = ~calls.any(dim=1)
@@ -129,6 +133,22 @@ def call_ec(logits: np.ndarray) -> np.ndarray:
         cut = capped.topk(5, dim=1).values[:, -1:]
         calls[over_cap] = capped >= cut
     return calls.numpy()
+
+
+def resolve_logit_shift(explicit: float | None, checkpoint: Path) -> tuple[float, str]:
+    """The logit shift to apply and where it came from: the flag, a sidecar calibration.json, or 0.
+
+    ``train.py --select-shift`` writes ``calibration.json`` (``{"logit_shift": ...}``) beside the
+    checkpoint it trains; the released checkpoints have none and keep the paper's rule.
+    """
+    if explicit is not None:
+        return float(explicit), "--logit-shift"
+    sidecar = checkpoint.parent / "calibration.json"
+    if sidecar.is_file():
+        value = json.loads(sidecar.read_text()).get("logit_shift")
+        if value is not None:
+            return float(value), str(sidecar)
+    return 0.0, "default (paper's 0.5 cut)"
 
 
 def sigmoid_confidence(logits: np.ndarray, calls: np.ndarray) -> list[np.ndarray]:
@@ -216,6 +236,12 @@ def main() -> int:
     parser.add_argument(
         "--confscore", action="store_true", help="sigmoid probability, or centroid distance for milcl_plus"
     )
+    parser.add_argument(
+        "--logit-shift",
+        type=float,
+        help="sigmoid models: call ECs with sigmoid(logit + shift) >= 0.5 (default: 'logit_shift' from "
+        "calibration.json beside the checkpoint, else 0 -- the paper's rule)",
+    )
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=256)
     args = parser.parse_args()
@@ -249,6 +275,9 @@ def main() -> int:
         else:
             model = load_milbc(str(checkpoint), spec["esm"], device)
         logits = score_sigmoid(model, domains[:, :-1, :], masks[:, :-1], esm2, spec["esm"], device, args.batch_size)
+        shift, shift_source = resolve_logit_shift(args.logit_shift, checkpoint)
+        if shift:
+            logits = logits + np.float32(shift)  # confidences then agree with the calls: >= 0.5 means called
         calls = call_ec(logits)
         scores = sigmoid_confidence(logits, calls) if args.confscore else None
     else:
@@ -265,6 +294,11 @@ def main() -> int:
         "model": args.model,
         "rule": "sigmoid 0.5" if spec["rule"] == "sigmoid" else "CLEAN max-separation",
     }
+    if spec["rule"] == "sigmoid":
+        summary["logit_shift"] = shift
+        summary["logit_shift_source"] = shift_source
+    elif args.logit_shift is not None:
+        print("[warn] --logit-shift only applies to the sigmoid models; ignored for milcl_plus")
     if args.confscore:
         summary["predicted_score"] = (
             "sigmoid probability, higher is more confident"
