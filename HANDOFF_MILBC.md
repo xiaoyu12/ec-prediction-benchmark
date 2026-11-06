@@ -359,3 +359,70 @@ Under the weighted F1 the same comparisons flip: released MIL-BC+ beats ESM2-BC 
 Scripts and the id50 fold lists now live in tracked `scripts/` (`scripts/debug/`,
 `scripts/folds/`); feature data, logs and run outputs stay in the gitignored `features/` and
 `runs/`. Shell scripts `cd` into `code/` themselves; the Python scripts run from any directory.
+
+## External baseline: EnzymeHunter (`scripts/run_enzymehunter.sh`)
+
+EnzymeHunter 0.1.15 (PyPI; github.com/cgxbio/EnzymeHunter), all-enzymes mode (no enzyme/non-enzyme
+classifier), ESM2 contact maps: CLEAN-style contrastive model + max-separation over split100 EC
+centroids, overridden by the TM-Vec top hit when DIAMOND identity > 90 % and TM-score > 0.9. Its
+reference split100 is identical to ours (same 227,362 entries, ECs, sequences); no test entry is in
+it (5 New-392 sequences are identical to training ones, as for every model). Setup needed: Zenodo
+assets (HF unreachable), ESM2/ResNet101 checkpoints from the torch cache, pandas<3, transformers<5,
+TMPDIR off /tmp, and a one-line local fix for the all-enzymes crash (details in the script).
+Predictions: `features/external/enzymehunter_tests_union_allenz.csv` (1.21 calls/enzyme).
+Scored with `scripts/bootstrap_ci.py --external EnzymeHunter=<csv>`.
+
+| per-enzyme F1 [95 % CI] | New               | Price             | U-all             | U-multi           | T-70              | T-50              |
+| ----------------------- | ----------------- | ----------------- | ----------------- | ----------------- | ----------------- | ----------------- |
+| EnzymeHunter            | 0.620 [.574,.667] | 0.416 [.345,.488] | 0.656 [.628,.685] | 0.596 [.523,.674] | 0.539 [.512,.567] | 0.453 [.419,.486] |
+| released MIL-BC+        | 0.560             | 0.397             | 0.713             | 0.684             | 0.578             | 0.500             |
+| retrained ESM2-BC       | 0.585             | 0.367             | 0.734             | 0.667             | 0.590             | 0.502             |
+| released MIL-CL+        | 0.575             | 0.402             | 0.695             | 0.591             | 0.562             | 0.480             |
+
+Paired differences (per-enzyme F1): EnzymeHunter is significantly better than both MIL-BC+ models
+and MIL-CL+ on New-392 (+0.05–0.06), level on Price, and significantly worse than MIL-BC+ and
+ESM2-BC on Uniprot-all, Test-70 and Test-50 (−0.04 to −0.08). Micro and weighted F1 tell the same
+story. Its strength is on the oldest benchmark; on the newer, homology-controlled sets it trails.
+
+## Domain-attention model (`new_model.md`) — 2026-11-06
+
+**Model** (`models.DomainAttentionEC`, `code/train_domattn.py`): ESM2-BC on the global ESM2-650M
+embedding + label-specific attention over per-domain features (one learned query per output,
+width 64, logits summed). Domain features (`code/domain_esm.py` → `features/domains/domain_esm.npz`):
+mean-pooled ESM2-650M layer-33 residue embeddings over each DCTdomain domain, domains chosen as
+MIL-BC's tokens (counts match MIL-BC for all 230,754 train+test rows; whole-protein domain = global
+embedding, cosine 1.00000). Segmentation rerun with `dctfast.py` (`features/domains/all-dct.npz`).
+Hierarchy: conditional logits for all 5,574 EC-tree nodes, P(EC) = product down the path; child
+loss only where the parent is positive; children of an unresolved prefix (`1.1.1.-`) masked
+(none in split100; unit-tested). Flags: `--flat` (no hierarchy), `--no-domains` (no domain branch).
+Scripts: `scripts/domain_features.sh`, `scripts/domattn_id50.sh`, `scripts/domattn_full.sh`.
+
+**Incident (2026-11-05 21:42–01:32):** `domain_esm.py`'s assembly step indexed an NpzFile array per
+protein, pinning a full chunk copy per protein (~254 GB) → three global OOM kills on the shared
+server, the last one hanging it. Fixed (read each chunk once; 4.6 GB peak). All jobs now run under
+`systemd-run --user --scope -p MemoryMax=… -p MemorySwapMax=0`. A second bug (flat mode trained with
+no positives) was fixed before the runs below.
+
+id50 per-enzyme F1 (epoch 80; noise ±0.011): hier+domains 0.879 / 0.880 (seed 1) / 0.877 (width
+128); flat+domains 0.877; hier, no domains 0.882; ESM2-BC 0.877; MIL-BC+ 0.868; MIL-BC 0.824.
+
+Test sets, per-enzyme F1 (full split100 training; `features/logs/bootstrap_domattn.{txt,json}`):
+
+| model                         | New   | Price | U-all | U-multi | T-70  | T-50  |
+| ----------------------------- | ----- | ----- | ----- | ------- | ----- | ----- |
+| DomAttn (hier + domains)      | 0.566 | 0.412 | 0.723 | 0.640   | 0.584 | 0.499 |
+| DomAttn-flat (domains only)   | 0.577 | 0.479 | 0.728 | 0.638   | 0.598 | 0.514 |
+| Hier-ESM2 (hier, no domains)  | 0.570 | 0.318 | 0.736 | 0.655   | 0.582 | 0.495 |
+| retrained ESM2-BC             | 0.585 | 0.367 | 0.734 | 0.667   | 0.590 | 0.502 |
+| released MIL-BC+              | 0.560 | 0.397 | 0.713 | 0.684   | 0.578 | 0.500 |
+| released MIL-CL+              | 0.575 | 0.402 | 0.695 | 0.591   | 0.562 | 0.480 |
+| EnzymeHunter                  | 0.620 | 0.416 | 0.656 | 0.596   | 0.539 | 0.453 |
+
+- DomAttn vs ESM2-BC and vs MIL-BC+: no significant difference on any set (per-enzyme, micro).
+- Domain branch (DomAttn vs Hier-ESM2; DomAttn-flat vs ESM2-BC) and hierarchy (DomAttn vs flat;
+  Hier-ESM2 vs ESM2-BC): no significant effect on New, U-all, U-multi, T-70, T-50.
+- Price "wins" (DomAttn-flat +0.11 vs ESM2-BC, significant by bootstrap) are not robust: Price F1
+  of the same run swings 0.330 → 0.376 → 0.479 between epochs 40/60/80, and the bootstrap only
+  covers test-sampling noise, not training noise. Seeds needed before claiming anything on Price.
+- DomAttn beats MIL-CL+ on U-all/T-70 and EnzymeHunter on U-all/T-70/T-50; loses to EnzymeHunter on
+  New. Under the weighted F1 released MIL-BC+ still beats everything (its calibration effect).

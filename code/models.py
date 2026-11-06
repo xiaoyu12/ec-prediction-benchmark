@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 NUM_CLASSES = 5242
@@ -150,6 +151,114 @@ class ESM2BC(nn.Module):
         if global_feature is None:
             raise ValueError("ESM2-BC needs the whole-sequence ESM2 embedding")
         return self.classifier(global_feature), global_feature
+
+
+def ec_hierarchy(classes: list[str]) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """EC tree over the vocabulary: ``(nodes, parent, level, leaf_node)``.
+
+    ``nodes`` lists every prefix ``a``, ``a.b``, ``a.b.c`` and every full EC, ordered by level so a
+    parent always precedes its children; ``parent[i]`` is the parent's position (-1 at level 1);
+    ``level[i]`` is 1..4; ``leaf_node[j]`` is the node of ``classes[j]``.
+    """
+    levels: list[set[str]] = [set(), set(), set(), set()]
+    for ec in classes:
+        parts = ec.split(".")
+        if len(parts) != 4:
+            raise ValueError(f"EC vocabulary entries must have four levels, found {ec}")
+        for depth in range(4):
+            levels[depth].add(".".join(parts[: depth + 1]))
+    nodes = [node for depth in range(4) for node in sorted(levels[depth])]
+    position = {node: i for i, node in enumerate(nodes)}
+    parent = np.array([position[n.rsplit(".", 1)[0]] if "." in n else -1 for n in nodes], dtype=np.int64)
+    level = np.array([n.count(".") + 1 for n in nodes], dtype=np.int64)
+    leaf_node = np.array([position[ec] for ec in classes], dtype=np.int64)
+    return nodes, parent, level, leaf_node
+
+
+class DomainAttentionEC(nn.Module):
+    """ESM2-BC plus label-specific attention over per-domain ESM2 embeddings.
+
+    Two branches whose logits are summed per output:
+
+    * global: the ``ESM2BC`` network on the whole-sequence ESM2 embedding;
+    * domain: every output ``k`` has a learned query ``q_k``; over the protein's domain features
+      ``r_m`` (mean-pooled ESM2 residue embeddings of each DCTdomain domain)
+      ``alpha_km = softmax_m(q_k . W_K r_m / sqrt(d))``, ``z_k = sum_m alpha_km W_V r_m``, and the
+      domain logit is ``w_k . dropout(z_k)`` with a learned readout ``w_k``.
+
+    ``hierarchical=False``: the outputs are the 5,242 EC numbers (independent sigmoids, as ESM2-BC).
+    ``hierarchical=True``: the outputs are every node of the EC tree (``ec_hierarchy``) and are
+    *conditional* logits, ``P(k | x) = P(parent(k) | x) * sigmoid(logit_k)``;
+    ``leaf_logits`` turns them into one logit per EC with ``sigmoid(leaf logit) = P(EC | x)``, so the
+    usual ``sigmoid >= 0.5`` rule (``infer.call_ec``) applies unchanged.
+    """
+
+    def __init__(
+        self,
+        classes: list[str],
+        domain_dim: int = ESM_DIM,
+        global_dim: int = ESM_DIM,
+        width: int = 64,
+        hierarchical: bool = True,
+        classifier_hidden_dim: int = 320,
+        dropout_rate: float = 0.2,
+        use_domains: bool = True,
+    ) -> None:
+        super().__init__()
+        self.hierarchical = hierarchical
+        self.use_domains = use_domains  # False: global branch only (ablation: ESM2-BC, +hierarchy if set)
+        if hierarchical:
+            nodes, parent, level, leaf_node = ec_hierarchy(list(classes))
+        else:
+            nodes, parent = list(classes), np.full(len(classes), -1)
+            level, leaf_node = np.full(len(classes), 4), np.arange(len(classes))
+        self.nodes = nodes
+        self.register_buffer("parent", torch.from_numpy(parent))
+        self.register_buffer("level", torch.from_numpy(level))
+        self.register_buffer("leaf_node", torch.from_numpy(leaf_node))
+        n_out = len(nodes)
+        self.global_branch = ESM2BC(n_out, global_dim, classifier_hidden_dim, dropout_rate)
+        self.key = nn.Linear(domain_dim, width, bias=False)
+        self.value = nn.Linear(domain_dim, width)
+        self.query = nn.Parameter(torch.randn(n_out, width) * 0.02)
+        self.readout = nn.Parameter(torch.randn(n_out, width) * 0.02)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, domains: Tensor, mask: Tensor, global_feature: Tensor) -> tuple[Tensor, Tensor]:
+        """Output logits (conditional ones when hierarchical) and the attention ``(batch, outputs, domains)``."""
+        if not torch.all(mask.any(dim=1)):
+            raise ValueError("every protein needs at least one domain")
+        global_logits = self.global_branch(global_feature=global_feature)[0]
+        if not self.use_domains:
+            return global_logits, mask.new_zeros(mask.shape[0], 0, mask.shape[1], dtype=global_logits.dtype)
+        keys = self.key(domains)
+        values = self.value(domains)
+        scores = torch.einsum("bmd,cd->bcm", keys, self.query) / keys.size(-1) ** 0.5
+        scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
+        attention = scores.softmax(dim=-1)
+        context = torch.einsum("bcm,bmd->bcd", attention, values)
+        domain_logits = (self.dropout(context) * self.readout[None]).sum(dim=-1)
+        return domain_logits + global_logits, attention
+
+    def node_log_probs(self, logits: Tensor) -> Tensor:
+        """``log P(node | x)`` for every output: the conditional log-sigmoids summed down the tree."""
+        log_prob = F.logsigmoid(logits)
+        if not self.hierarchical:
+            return log_prob
+        out = log_prob.clone()
+        for depth in range(2, 5):
+            nodes = torch.nonzero(self.level == depth).squeeze(1)
+            out[:, nodes] = log_prob[:, nodes] + out[:, self.parent[nodes]]
+        return out
+
+    def leaf_logits(self, logits: Tensor) -> Tensor:
+        """One logit per EC of the vocabulary, ``sigmoid(leaf logit) = P(EC | x)``."""
+        if not self.hierarchical:
+            return logits[:, self.leaf_node]
+        log_p = self.node_log_probs(logits)[:, self.leaf_node].clamp(max=-1e-7)
+        # log(1 - p) from log p, stably: log(-expm1(log p)) near p = 1, log1p(-exp(log p)) otherwise
+        log_not = torch.where(log_p > -0.6931, torch.log(-torch.expm1(log_p)), torch.log1p(-torch.exp(log_p)))
+        return log_p - log_not
 
 
 class GatedAttentionPooler(nn.Module):

@@ -37,6 +37,19 @@ SHORT = {
     "retrained MIL-BC": "ret BC", "retrained MIL-BC+": "ret BC+", "retrained ESM2-BC": "ret ESM2",
     "retrained MIL-CL+": "ret CL+",
 }
+EXTERNAL_REFERENCES = ["released MIL-BC+", "retrained MIL-BC+", "retrained ESM2-BC", "released MIL-CL+"]
+
+
+def read_external(path: Path) -> dict[str, list[str]]:
+    """``Entry -> predicted ECs`` from another tool's table (first EC-like column after Entry)."""
+    import csv
+    text = path.read_text().splitlines()
+    delimiter = "\t" if text[0].count("\t") > text[0].count(",") else ","
+    rows = list(csv.DictReader(text, delimiter=delimiter))
+    column = next(c for c in rows[0] if c != "Entry" and "ec" in c.lower())
+    return {r["Entry"]: [ec.strip() for ec in (r[column] or "").split(";") if ec.strip()] for r in rows}
+
+
 COMPARISONS = [  # (A, B): is A better than B?
     ("retrained MIL-BC+", "released MIL-BC+"),
     ("retrained MIL-BC", "released MIL-BC"),
@@ -88,6 +101,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--resamples", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--external", action="append", default=[], metavar="NAME=CSV",
+                        help="predictions of another tool: a CSV/TSV with an Entry column and an EC column "
+                             "(';'-separated); compared against the main models. Repeatable.")
+    parser.add_argument("--pair", action="append", default=[], metavar="A|B",
+                        help="extra paired comparison A - B between any two model names. Repeatable.")
     args = parser.parse_args()
 
     classes = np.load(ROOT / "checkpoints/classes.npy", allow_pickle=True).astype(str)
@@ -96,6 +114,7 @@ def main() -> int:
     for n in TESTS:
         st = load_archive(F / f"tests/{n}.npz").to(DEVICE)
         tests[n] = (st, attach_labels(st, read_labels(F / f"tests/{n}.csv"), index, n, False))
+    load_entries = {n: [st.entries[r] for r in ds.rows] for n, (st, ds) in tests.items()}
 
     predictions: dict[str, dict[str, list[list[str]]]] = {}
     for label, (name, full, _) in SIGMOID.items():
@@ -110,6 +129,25 @@ def main() -> int:
                 chunks = [model(*fetch(st, torch.from_numpy(ds.rows[s:s + 2048]), DEVICE, local_only=False)).float().cpu().numpy()
                           for s in range(0, len(ds.rows), 2048)]
             predictions[label][n] = calls_to_ecs(apply_max_separation(np.concatenate(chunks), centers)[0], classes)
+    comparisons = list(COMPARISONS)
+    for spec in args.external:
+        name, path = spec.split("=", 1)
+        calls = read_external(Path(path).expanduser().resolve())
+        predictions[name] = {}
+        for n, (_, ds) in tests.items():
+            entries = [load_entries[n][i] for i in range(len(ds.true_ecs))]
+            missing = [e for e in entries if e not in calls]
+            if missing:
+                raise SystemExit(f"{path}: no prediction for {len(missing)} {n} enzymes, e.g. {missing[:3]}")
+            predictions[name][n] = [calls[e] for e in entries]
+        SHORT.setdefault(name, name[:9])
+        comparisons += [(name, ref) for ref in EXTERNAL_REFERENCES]
+    for spec in args.pair:
+        a, b = spec.split("|", 1)
+        for name in (a, b):
+            if name not in predictions:
+                raise SystemExit(f"--pair: unknown model {name!r}; known: {sorted(predictions)}")
+        comparisons.append((a, b))
     labels = list(predictions)
 
     rng = np.random.default_rng(args.seed)
@@ -142,7 +180,7 @@ def main() -> int:
                 boot, point = samples[lab][metric]
                 lo, hi = torch.quantile(boot, torch.tensor([0.025, 0.975], dtype=torch.float64, device=DEVICE)).tolist()
                 results["scores"].setdefault(metric, {}).setdefault(lab, {})[n] = {"f1": point, "lo": lo, "hi": hi}
-            for a, b in COMPARISONS:
+            for a, b in comparisons:
                 diff = samples[a][metric][0] - samples[b][metric][0]
                 lo, hi = torch.quantile(diff, torch.tensor([0.025, 0.975], dtype=torch.float64, device=DEVICE)).tolist()
                 results["differences"].setdefault(metric, {}).setdefault(f"{a} - {b}", {})[n] = {
@@ -161,7 +199,7 @@ def main() -> int:
             print(f"{SHORT[lab]:10s}" + "".join(f"  {row[n]['f1']:.3f} [{row[n]['lo']:.3f},{row[n]['hi']:.3f}]" for n in TESTS))
         print(f"\n### {metric} F1, paired difference A - B [95% CI] (* = CI excludes 0)")
         print(f"{'A - B':20s}" + "".join(f"{head[n]:>18s}" for n in TESTS))
-        for a, b in COMPARISONS:
+        for a, b in comparisons:
             row = results["differences"][metric][f"{a} - {b}"]
             cells = []
             for n in TESTS:
