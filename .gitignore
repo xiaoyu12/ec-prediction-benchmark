@@ -3,3 +3,4 @@ DCTdomain/src/RecCut
 runs/
 *.compact.npz
 features/
+envs/
