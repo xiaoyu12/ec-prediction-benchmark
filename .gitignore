@@ -4,3 +4,5 @@ runs/
 *.compact.npz
 features/
 envs/
+models/
+swissprot_pdb_v6.tar

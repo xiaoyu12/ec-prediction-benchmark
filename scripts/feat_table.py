@@ -18,6 +18,10 @@ SHORT = {"uniprot-all": "U-all", "uniprot-multi": "U-multi", "test70": "T-70", "
 
 def describe(config: dict) -> str:
     parts = [config["arch"], config["loss"], f"h{config['hidden']}x{config['layers']}"]
+    if config.get("out", "linear") != "linear":
+        parts.append(config["out"])
+    if config.get("balance"):
+        parts.append(f"bal{config['balance']}")
     if config.get("ema"):
         parts.append(f"ema{config['ema']}")
     if config.get("block_dropout"):

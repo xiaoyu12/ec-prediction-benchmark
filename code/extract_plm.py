@@ -20,9 +20,17 @@ Every feature is a mean over the residues of the protein (special tokens exclude
   Also writes ``3di.fasta``: the per-residue 3Di states predicted by ProstT5's CNN head. Weights are
   rebuilt from Foldseek's GGUF copy by ``prostt5_from_gguf.py`` (huggingface.co is unreachable here).
 - ``esm2-3b``: ``last`` (layer 36, 2560), ``mid`` (layer 24), half precision.
+- ``saprot-650m``: ``last`` (layer 33, 1280), ``mid`` (layer 24) of SaProt-650M-AF2, an ESM-2 650M
+  trained on structure-aware tokens (each residue = amino acid x Foldseek 3Di state, 441 + 5
+  tokens). Loaded with fair-esm from ``models/SaProt_650M_AF2.pt``, so run it in the repo ``.venv``.
+  The 3Di string per protein comes from ``--states`` (default ``features/plm/afdb/3di.fasta``:
+  AlphaFold-DB 3Di, ProstT5-predicted where no exact AFDB match); half precision.
 
 Output: ``<out-dir>/entries.txt`` (csv order) and one ``<feature>.npy`` (n, dim) float16 each.
-Work is checkpointed into ``<out-dir>/partial/chunk_*.npz``; rerunning resumes.
+Work is checkpointed into ``<out-dir>/partial/chunk_*.npz``; rerunning resumes. To split one
+extraction over GPUs, start ``--shard 0/2`` and ``--shard 1/2`` together (same ``--out-dir``, one
+device each), then run once more without ``--shard`` to assemble. Restart a shard only while the
+other is stopped, or the two may extract the same proteins.
 """
 
 from __future__ import annotations
@@ -43,7 +51,10 @@ SPECS = {
     "prott5": dict(repo="Rostlab/prot_t5_xl_uniref50"),
     "prostt5": dict(repo=str(Path.home() / ".local/opt/prostt5_hf"), tokenizer="Rostlab/prot_t5_xl_uniref50"),
     "esm2-3b": dict(repo="facebook/esm2_t36_3B_UR50D", mid=24),
+    "saprot-650m": dict(repo=str(Path(__file__).resolve().parent.parent / "models" / "SaProt_650M_AF2.pt"), mid=24),
 }
+# SaProt vocabulary (SaProt utils/esm_loader.py): 5 specials, then amino acid x 3Di state.
+SAPROT_AA, SAPROT_3DI = "ACDEFGHIKLMNPQRSTVWYX", "pynwrqhgdlvtmfsaeikc#"
 
 
 class Extractor:
@@ -72,6 +83,21 @@ class Extractor:
                 self.cnn = CNN()
                 self.cnn.load_state_dict(torch.load(Path(spec["repo"]) / "cnn.pt"))
                 self.cnn = self.cnn.to(device).eval()
+        elif name == "saprot-650m":
+            import esm
+            from esm.model.esm2 import ESM2
+
+            tokens = ["<cls>", "<pad>", "<eos>", "<unk>", "<mask>"] + [a + b for a in SAPROT_AA for b in SAPROT_3DI]
+            alphabet = esm.Alphabet(standard_toks=tokens, prepend_toks=[], append_toks=[], prepend_bos=True,
+                                    append_eos=True, use_msa=False)
+            alphabet.all_toks = alphabet.all_toks[:len(tokens)]  # drop the <null_*> padding to a multiple of 8
+            alphabet.tok_to_idx = {t: i for i, t in enumerate(alphabet.all_toks)}
+            data = torch.load(spec["repo"], map_location="cpu", weights_only=False)
+            self.model = ESM2(alphabet=alphabet, **data["config"])
+            missing, unexpected = self.model.load_state_dict(data["model"], strict=False)
+            assert not unexpected and all(k.startswith("contact_head") for k in missing), (missing, unexpected)
+            self.model = self.model.half().to(device).eval()
+            self.layers = data["config"]["num_layers"]
         else:
             from transformers import AutoTokenizer, EsmModel
 
@@ -79,9 +105,26 @@ class Extractor:
             self.model = EsmModel.from_pretrained(spec["repo"], add_pooling_layer=False,
                                                   torch_dtype=torch.float16).to(device).eval()
 
+    @staticmethod
+    def saprot_tokens(sequence: str, states: str) -> list[int]:
+        """<cls>, one token per residue (amino acid x lower-case 3Di; unknowns -> X / #), <eos>."""
+        aa = {a: i for i, a in enumerate(SAPROT_AA)}
+        di = {b: i for i, b in enumerate(SAPROT_3DI)}
+        assert len(sequence) == len(states), (len(sequence), len(states))
+        return [0] + [5 + aa.get(a, 20) * 21 + di.get(b, 20) for a, b in zip(sequence, states.lower())] + [2]
+
     @torch.inference_mode()
-    def __call__(self, sequences: list[str]) -> dict[str, np.ndarray]:
+    def __call__(self, sequences: list[str], states: list[str] | None = None) -> dict[str, np.ndarray]:
         lengths = torch.tensor([len(s) for s in sequences], device=self.device)
+        if self.name == "saprot-650m":
+            rows = [self.saprot_tokens(s, t) for s, t in zip(sequences, states)]
+            tokens = torch.ones(len(rows), max(map(len, rows)), dtype=torch.long)  # 1 = <pad>
+            for i, row in enumerate(rows):
+                tokens[i, :len(row)] = torch.tensor(row)
+            out = self.model(tokens.to(self.device), repr_layers=[self.mid, self.layers])
+            residues = self._residue_mask(lengths, tokens.shape[1], offset=1)
+            return {"last": self._mean(out["representations"][self.layers].float(), residues),
+                    "mid": self._mean(out["representations"][self.mid].float(), residues)}
         if self.name in ("prott5", "prostt5"):
             spaced = [" ".join(s.translate(str.maketrans("UZOB", "XXXX"))) for s in sequences]
             enc = self.tokenizer(spaced, add_special_tokens=True, padding="longest", return_tensors="pt").to(self.device)
@@ -137,7 +180,13 @@ def main() -> int:
     parser.add_argument("--checkpoint-every", type=int, default=5000)
     parser.add_argument("--limit", type=int, help="first N proteins only (smoke test)")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--states", default=str(Path(__file__).resolve().parent.parent / "features" / "plm" / "afdb"
+                                                / "3di.fasta"), help="3Di FASTA for saprot-650m")
+    parser.add_argument("--shard", help="i/n: extract only every n-th remaining protein (by length), starting at i, "
+                        "and skip assembly; run once more without --shard to assemble")
     args = parser.parse_args()
+    shard, n_shards = (int(x) for x in args.shard.split("/")) if args.shard else (0, 1)
+    tag = f"s{shard}of{n_shards}_" if args.shard else ""
 
     out_dir = Path(args.out_dir).expanduser().resolve()
     partial = out_dir / "partial"
@@ -147,11 +196,19 @@ def main() -> int:
     if args.limit:
         rows = rows[:args.limit]
     sequences = dict(rows)
+    states: dict[str, str] = {}
+    if args.model.startswith("saprot"):
+        name = None
+        for line in Path(args.states).read_text().splitlines():
+            if line.startswith(">"):
+                name = line[1:].split()[0]
+            else:
+                states[name] = states.get(name, "") + line.strip()
     done: set[str] = set()
     for chunk in sorted(partial.glob("chunk_*.npz")):
         with np.load(chunk) as data:
             done.update(str(e) for e in data["entries"])
-    todo = sorted((e for e, _ in rows if e not in done), key=lambda e: len(sequences[e]))
+    todo = sorted((e for e, _ in rows if e not in done), key=lambda e: len(sequences[e]))[shard::n_shards]
     print(f"{len(rows)} proteins, {len(done)} done, {len(todo)} to go", flush=True)
 
     if todo:
@@ -162,18 +219,19 @@ def main() -> int:
         def flush() -> None:
             if not buffer["entries"]:
                 return
-            index = len(list(partial.glob("chunk_*.npz")))
-            tmp = partial / f".tmp_{index:05d}.npz"
+            index = len(list(partial.glob(f"chunk_{tag}*.npz")))
+            tmp = partial / f".tmp_{tag}{index:05d}.npz"
             np.savez(tmp, entries=np.array(buffer["entries"]),
                      **{k: np.concatenate(v) if k == "3di" else np.concatenate(v).astype(np.float16)
                         for k, v in buffer.items() if k != "entries"})
-            tmp.replace(partial / f"chunk_{index:05d}.npz")
+            tmp.replace(partial / f"chunk_{tag}{index:05d}.npz")
             for value in buffer.values():
                 value.clear()
 
         def run(batch: list[str]) -> None:
             nonlocal finished
-            for key, value in extractor([sequences[e] for e in batch]).items():
+            structure = [states[e] for e in batch] if states else None
+            for key, value in extractor([sequences[e] for e in batch], structure).items():
                 buffer.setdefault(key, []).append(value)
             buffer["entries"].extend(batch)
             finished += len(batch)
@@ -194,6 +252,9 @@ def main() -> int:
             run(batch)
         flush()
 
+    if args.shard:
+        print(f"shard {args.shard} done; run again without --shard to assemble", flush=True)
+        return 0
     # Assemble in csv order, one array per feature, reading each chunk once.
     chunks = sorted(partial.glob("chunk_*.npz"))
     with np.load(chunks[0]) as data:

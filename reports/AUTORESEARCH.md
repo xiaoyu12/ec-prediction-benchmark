@@ -22,7 +22,7 @@ hyperparameters, **on the same training and test data**.
   comparisons. Test sets are small (77–1,057 enzymes); Price in particular swings ±0.05 between
   epochs of one run.
 
-## Summary (through entry 18)
+## Summary (through entry 26)
 
 - **Best model (id50-selected):** `hyb_ens6_6b_msaf`, entry 16. It averages six MLP heads on frozen
   embeddings (ESM2-650M; ESMC-600M final layer; ESMC-600M SAE-max; ESMC-600M layer 27 ⊕ ESM2;
@@ -34,19 +34,32 @@ hyperparameters, **on the same training and test data**.
   New and Price.
 - **Best single network:** ESM2-3B last ⊕ ESMC-600M last ⊕ ESMC-600M SAE-max (full test mean
   0.619). The fine-tuned ESMC-600M is the best single model on id50 (0.908).
+- **Simplest strong model (entry 25):** the c3 head plus MMseqs2/Foldseek-AFDB homology
+  (`hyb_c3_msaf`): id50 0.916, full test mean 0.632. It matches the best model on the five
+  non-U-multi sets (mean 0.616 both) and trails only on multi-EC U-multi (0.716 vs 0.751).
+- **Best single embedding (entry 26):** ESM2-3B last, full test mean 0.617 over 3 seeds
+  (ESMC-600M SAE-max 0.605). With homology, it ties ESMC-600M SAE-max (0.625 vs 0.627).
 - **What helped:** sparse-autoencoder (SAE) max-pooled features of ESMC, ensembling different
   feature heads, identity-gated homology, and structural homology (Foldseek).
 - **What did not:** ESMC-6B hidden states, alternative losses, EC-hierarchy loss, block dropout,
-  hidden-space kNN, a GBT stacker, seed averaging, and real-vs-predicted 3Di.
+  hidden-space kNN, a GBT stacker, seed averaging, real-vs-predicted 3Di, and fancier heads. Deeper,
+  residual, SiLU/ReLU, other dropout values and gated heads all land within seed noise; block
+  attention is worse (entry 20). Rare-class rebalancing (logit adjustment, loss reweighting) and a
+  class-mean prototype output layer (entries 21–22). SaProt-650M-AF2 embeddings (entries 23–24): below
+  ESM2-650M alone (0.569 vs 0.588), a tie when added to c3 or the hybrid, with or without SaProt's
+  pLDDT < 70 masking.
 - **Plateau:** every hybrid since entry 13 scores 0.913–0.916 on id50 and 0.633–0.642 on the full
   test mean. The seed noise is about 0.003.
+- **Where the error is (entry 19):** 85% of test error is on queries below 50% identity to
+  training, and half is on queries whose EC has fewer than 10 training examples. The id50 fold
+  under-represents both, so it is a weak guide for the gains still available.
 
 ## Code
 
 | file | what |
 |---|---|
-| `code/extract_plm.py` | Per-protein pooled embeddings: ESMC-600M/6B (final and SAE-layer hidden states, plus SAE features), ProtT5, ProstT5, ESM2-3B. Runs in `envs/esmc` (Biohub `esm`), resumable. |
-| `code/train_feat.py` | Heads on fixed embeddings, single or combined (MLP / gated / linear; BCE / ASL / focal; EMA; block dropout; EC-hierarchy aux loss; hidden-space kNN). Both protocols. |
+| `code/extract_plm.py` | Per-protein pooled embeddings: ESMC-600M/6B (final and SAE-layer hidden states, plus SAE features), ProtT5, ProstT5, ESM2-3B; SaProt-650M (in `.venv`). Runs in `envs/esmc` (Biohub `esm`), resumable, `--shard i/n` to split over GPUs. |
+| `code/train_feat.py` | Heads on fixed embeddings, single or combined (MLP / residual MLP / block attention / gated / linear; GELU/SiLU/ReLU; BCE / ASL / focal; EMA; block dropout; EC-hierarchy aux loss; hidden-space kNN). Both protocols. |
 | `code/knn_feat.py` | Cosine nearest-neighbour EC transfer on the same embeddings. |
 | `code/homology.py` | MMseqs2 homology transfer; `--tool foldseek` for structural (ProstT5 3Di + AA) homology. |
 | `code/prostt5_from_gguf.py` | Rebuilds ProstT5 (encoder + 3Di CNN) from Foldseek's GGUF copy, since huggingface.co is unreachable here. It agrees with Foldseek's own 3Di prediction on 99.8% of residues. |
@@ -55,6 +68,9 @@ hyperparameters, **on the same training and test data**.
 | `code/finetune_plm.py` | Partial fine-tuning of ESMC-600M (implemented, smoke-tested, deprioritized). |
 | `scripts/feat.sh`, `scripts/extract_plm.sh` | Memory-capped wrappers. |
 | `scripts/afdb_3di.py` | 3Di from AlphaFold-DB Swiss-Prot structures (Foldseek DB), ProstT5 fallback. |
+| `scripts/afdb_plddt.py` | Per-residue pLDDT from `swissprot_pdb_v6.tar` (streamed) and pLDDT-masked 3Di for SaProt. |
+| `scripts/rare_eval.py` | Per-enzyme F1 by training count of the query's rarest EC; post-hoc logit adjustment of rare classes (`--adjust tau:n0`, `--write`). |
+| `scripts/stratify.py` | Per-enzyme F1 by top-hit identity bin (no hit / <30 / 30–50 / 50–70 / ≥70%), with each bin's share of the remaining error. |
 | `scripts/feat_table.py` | Builds the results tables from `runs/feat/*/metrics.json`. |
 
 Features live in `features/plm/<model>/<key>.npy` (float16, rows in `features/domains/all_union.csv`
@@ -610,3 +626,394 @@ Longer schedule (`id50_ft_esmc600_e4`, 4 epochs, otherwise identical; 4.7 h):
   improve. U-multi falls and the test mean is flat (0.589 vs 0.591). In the hybrid it gives the same
   0.915 on id50 as the 2-epoch head. Its full-protocol retrain (about 5 h) is not run: on the id50
   protocol the test columns are unchanged and the hybrid is unchanged.
+
+### 19. Where the remaining errors are (`scripts/stratify.py`)
+
+The best model's per-enzyme F1 is split by each query's top-hit identity to training. Identity is
+the maximum over MMseqs2 and Foldseek-AFDB, and "no hit" means neither tool finds a hit at e-value
+1e-3. Each row compares five runs: the hybrid `hyb_ens6_6b_msaf`, its six-head ensemble without
+homology (`ens6_6b`), the best single head (`c3` = ESM2-3B ⊕ ESMC-600M last ⊕ SAE-max), and each
+homology tool alone. Tests use the full protocol, id50 the id50 protocol. Full output:
+`features/logs/stratify.txt`.
+
+| pooled test queries (3,394) | n | share | hybrid | models | c3 head | MMseqs2 | Foldseek-AFDB | share of hybrid error |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| no hit | 95 | 0.028 | 0.404 | 0.404 | 0.372 | 0 | 0 | 0.050 |
+| < 30% | 608 | 0.179 | 0.483 | 0.465 | 0.450 | 0.381 | 0.440 | 0.277 |
+| 30–50% | 1,519 | 0.448 | 0.612 | 0.591 | 0.601 | 0.588 | 0.594 | 0.518 |
+| 50–70% | 707 | 0.208 | 0.847 | 0.824 | 0.827 | 0.845 | 0.847 | 0.095 |
+| ≥ 70% | 465 | 0.137 | 0.854 | 0.846 | 0.835 | 0.854 | 0.847 | 0.060 |
+| *id50 fold, 30–50%* | 9,319 | 0.894 | 0.939 | 0.936 | 0.940 | 0.926 | 0.927 | – |
+
+The same hybrid is split by how many training examples the query's rarest true EC has
+(`features/logs/stratify_freq.txt`):
+
+| rarest true EC: training examples | id50: share | id50: F1 | tests: share | tests: F1 | tests: share of error |
+|---|---:|---:|---:|---:|---:|
+| 1–9 | 0.120 | 0.723 | 0.328 | 0.505 | 0.485 |
+| 10–49 | 0.170 | 0.892 | 0.312 | 0.674 | 0.304 |
+| 50–199 | 0.227 | 0.917 | 0.212 | 0.723 | 0.175 |
+| ≥ 200 | 0.483 | 0.968 | 0.149 | 0.918 | 0.037 |
+
+- **85% of the remaining test error is on queries below 50% identity**, or with no hit at all.
+  Above 50% identity, homology alone is as good as the hybrid. Learned models can only add value in
+  the remote-homology regime.
+- **The headroom is in rare ECs.** A third of the test queries carry an EC with fewer than 10
+  training examples, against 12% of id50. Those queries account for half of the test error. Common
+  ECs (≥ 200 examples) are essentially solved (0.918).
+- **Why id50 selection transfers poorly.** At the same 30–50% identity, id50 queries score 0.94 and
+  test queries 0.61. The id50 fold is drawn from the training distribution, where common ECs
+  dominate, so it rewards fitting common classes. The test sets are enriched in rare and recently
+  annotated ECs. This explains why the stacker (entry 8) and the late hybrids win on id50 without
+  winning on the tests. It also means a gain for rare classes may hardly show on id50.
+- **Model vs homology, per bin.** Below 30% identity, the model ensemble beats both homology tools
+  (0.465 vs 0.381 / 0.440), and the gate adds a little more (0.483). On Price the model alone is
+  better than the hybrid (c3 head 0.464 vs 0.425): its homologs mislead.
+- **New ≥ 70% identity is only 0.709.** Even close homologs often carry a different EC, which looks
+  like annotation changes or EC refinements in newly annotated proteins. Neither models nor
+  homology can recover these from sequence similarity.
+
+### 20. Head architecture sweep on the c3 features (`train_feat.py --arch/--act`)
+
+**Question.** Does a deeper or more elaborate head help, given the best feature set? The features
+are c3 (ESM2-3B last ⊕ ESMC-600M last ⊕ ESMC-600M SAE-max). Each block is projected to 512-d and
+LayerNorm'd before the head.
+
+**Note on the baseline.** The baseline `mlp` head is already concat → GELU → dropout →
+Linear(1536, 1024) → LayerNorm → GELU → dropout(0.3) → output. So LayerNorm, GELU and dropout were
+in place from the start.
+
+**New options.**
+- `--arch resmlp`: pre-norm residual blocks, each LN → Linear(×2) → act → dropout → Linear → dropout
+  plus a skip connection.
+- `--arch blockattn`: the three projected blocks become tokens, with a learned block embedding and
+  a [CLS] token. These go through a pre-norm Transformer encoder with 8 heads, and the CLS output
+  feeds the classifier.
+- `--act gelu|relu|silu`.
+
+**Setup.** id50 protocol, 100 epochs, everything else at its default (lr 1e-3, wd 0.05, batch
+512). Selection is on id50. The "test mean" column comes from the same id50-protocol models
+(trained without the id50 fold) on the six tests. It is not the full-protocol number, and it is
+shown only as a secondary check.
+
+| head | params | seeds | id50 | test mean (id50 models) |
+|---|---:|---:|---:|---:|
+| **mlp, 1×1024, GELU, dropout 0.3 (baseline)** | 17.2M | 3 | 0.904 / 0.904 / 0.901 | 0.598 / 0.606 / 0.607 |
+| mlp, dropout 0.1 | 17.2M | 1 | 0.901 | 0.597 |
+| mlp, dropout 0.5 | 17.2M | 1 | 0.905 | 0.603 |
+| mlp, 2 hidden layers | – | 1 | 0.901 | 0.604 |
+| mlp, 3 hidden layers | – | 1 | 0.903 | 0.605 |
+| mlp, SiLU | 17.2M | 1 | 0.902 | 0.610 |
+| mlp, ReLU | 17.2M | 1 | 0.904 | 0.600 |
+| resmlp, 2 blocks × 1024 | – | 2 | 0.904 / 0.898 | 0.611 / 0.599 |
+| resmlp, 4 blocks × 1024 | 34.0M | 3 | 0.901 / 0.901 / 0.901 | 0.614 / 0.597 / 0.602 |
+| resmlp, 4 blocks × 2048 | 91.3M | 1 | 0.902 | 0.604 |
+| gated block fusion | 16.2M | 1 | 0.894 | 0.601 |
+| block attention, 2 layers, FFN 2048 | – | 1 | 0.886 | 0.581 |
+| block attention, 4 layers, FFN 2048 | 25.6M | 1 | 0.891 | 0.582 |
+
+**Findings.**
+- **Most heads land within seed noise of the baseline.** That covers depth (1–3 MLP layers;
+  residual stacks of 2–4 blocks at up to 91M parameters), activation (GELU, SiLU, ReLU) and dropout
+  (0.1–0.5).
+  - On id50 these heads score 0.898–0.905, against a baseline seed range of 0.901–0.904.
+  - On the tests they score 0.597–0.614, against a baseline seed range of 0.598–0.607.
+  - resmlp-4 first scored 0.614 on the tests. Its two seed repeats scored 0.597 and 0.602, so that
+    gain was noise.
+- **Block attention is clearly worse:** about −0.015 on id50 and −0.02 on the tests. With only
+  three tokens (one per pooled embedding) there is nothing for attention to work on. It just adds
+  optimisation difficulty compared with concatenation.
+- **The gated fusion is also below the baseline on id50** (0.894).
+- **Why the head doesn't matter.** These are pooled, frozen embeddings, and the classes are mostly
+  separable by a shallow head. The binding constraint is the rare EC classes and remote homologs
+  found in entry 19, not head capacity. Adding capacity mainly helps fit the common classes, which
+  are already solved.
+- **No full-protocol retrain was run:** no head survived id50 selection.
+
+### 21. Rebalancing for rare ECs (`train_feat.py --balance`, `scripts/rare_eval.py --adjust`)
+
+**Motivation.** Entry 19 found that half of the test error is on queries whose EC has fewer than
+10 training examples. This entry tests two standard long-tail fixes on the c3 head (id50 protocol,
+100 epochs).
+
+- **Post-hoc logit adjustment.** Add `tau * max(0, log(n0 / n_c))` to the logit of every class
+  with fewer than `n0` training proteins (Menon et al. 2021, restricted to the tail). It costs
+  nothing to train.
+- **Loss reweighting** (`--balance beta`). Each training protein's BCE is weighted by
+  `n^-beta` (mean 1), where `n` is the training count of its rarest EC.
+
+`scripts/rare_eval.py` reports per-enzyme F1 by the training count of the query's rarest true EC.
+"tests" pools the 3,394 queries of the six tests, and the counts come from the id50-protocol
+training set.
+
+| model (id50 protocol) | id50 | id50, 1–9 | tests, 1–9 (1,129) | tests, 10–49 | tests, 50–199 | tests, ≥ 200 | test mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| c3 baseline (seed 1) | 0.904 | 0.641 | 0.458 | 0.653 | 0.718 | 0.907 | 0.606 |
+| + adjust tau 0.5, n0 200 | 0.903 | 0.650 | 0.488 | 0.652 | 0.712 | 0.894 | 0.614 |
+| + adjust tau 1, n0 50 | 0.902 | 0.653 | 0.487 | 0.647 | 0.700 | 0.891 | 0.610 |
+| + adjust tau 2, n0 50 | 0.887 | 0.614 | 0.447 | 0.612 | 0.654 | 0.873 | 0.570 |
+| balance beta 0.3 | 0.902 | 0.636 | 0.454 | 0.661 | 0.696 | 0.902 | 0.607 |
+| balance beta 0.5 | 0.901 | 0.623 | 0.449 | 0.657 | 0.706 | 0.915 | 0.603 |
+| balance beta 1.0 | 0.896 | 0.640 | 0.454 | 0.639 | 0.694 | 0.891 | 0.592 |
+
+**Logit adjustment does not replicate.**
+- On seed 1, adjustment with tau 0.5 and n0 200 lifts rare-EC test queries by +0.03, costs about
+  0.01 on common ones, and gains +0.008 on the test mean. It costs −0.001 on id50.
+- The same setting on three other c3-family models changes the test mean by −0.005 (seed 2),
+  +0.005 (seed 0) and −0.002 (resmlp-4), so the overall change is noise.
+- In effect the adjustment trades common-class precision for rare-class recall at roughly break-even.
+
+**Loss reweighting does not help, not even the rare bin** (0.449–0.454 vs 0.458).
+- Higher beta mostly hurts. Beta 1.0 costs 0.008 on id50 and 0.014 on the tests.
+- So the rare-class gap is not a class-prior or bias problem that reweighting can fix. Rare ECs
+  are ranked low because their few training proteins don't place remote test members near them in
+  embedding space.
+
+### 22. Prototype (class-mean) and cosine output layers (`train_feat.py --out proto|cosine`)
+
+**Idea.** Score a protein against the average embedding of each EC instead of a learned weight
+vector per EC. A class with one training protein then gets a prototype as good as that protein's
+embedding, and there is no per-class bias encoding the prior.
+
+**Design.**
+- `proto`: the score is `s * cos(h - m, mu_c) + b`.
+  - `mu_c` is the mean of the centered, L2-normalized hidden vectors of EC `c`'s training
+    proteins. It is recomputed from the current network every 50 steps and before evaluation.
+  - `s` and `b` are a single learned scale and bias shared by all classes.
+  - Recomputing once per epoch diverged: the prototypes went stale, and from a random start every
+    class mean points the same way. Refreshing every 50 steps and centering on the training mean
+    fixed this.
+- `cosine`: the same scoring, but with learned per-class vectors (a normalized classifier).
+- Setup: c3 features, MLP body, id50 protocol, 100 epochs.
+
+| output layer | id50 | calls per protein (id50) | tests, 1–9 | tests, ≥ 200 | test mean |
+|---|---:|---:|---:|---:|---:|
+| linear (baseline, seed 1) | 0.904 | 1.04 | 0.458 | 0.907 | 0.606 |
+| cosine | 0.902 | 1.04 | 0.460 | 0.912 | 0.610 |
+| proto, decision rule as is | 0.749 | 1.83 | – | – | 0.484 |
+| proto, logits shifted by −8 | 0.818 | 1.09 | 0.489 | 0.780 | 0.529 |
+
+**Findings.**
+- **The cosine classifier equals the linear head**, within seed noise.
+- **The prototype head over-calls and ranks worse.** Neighbouring ECs have similar means, so
+  several pass the threshold. Even with a global shift that brings it to one call per protein, it
+  reaches only 0.818 on id50.
+- **It does help rare ECs a little** (tests 0.489 vs 0.458), as intended. But it collapses on
+  common ones (0.780 vs 0.907).
+- **Why common ECs fail.** Large EC classes are multi-modal: unrelated folds and convergent
+  families share an EC number, so one mean vector represents them poorly. The kNN methods (entries
+  2 and 11) sit at the other extreme, with one prototype per protein, and also lost to the linear
+  head.
+- **Blending doesn't rescue it.** Averaging the baseline's probabilities with the prototype
+  head's (weight 0.3 or 0.5) gives 0.592–0.607 on the tests and ≤ 0.902 on id50. Averaging two
+  seeds of the baseline gives 0.611–0.613, so the prototype head adds nothing an extra seed
+  doesn't.
+
+### 23. SaProt-650M-AF2 structure-aware embeddings (`extract_plm.py --model saprot-650m`)
+
+**Model.** SaProt (Su et al. 2024) is ESM-2 650M retrained on structure-aware tokens. Each residue
+is one of 21 amino acids × 21 Foldseek 3Di states (`#` = masked), giving 446 tokens with the
+specials.
+- Weights: `models/SaProt_650M_AF2.pt`, supplied by the user since huggingface.co is blocked here.
+- Loading: fair-esm in `.venv`, with SaProt's vocabulary order (`<cls> <pad> <eos> <unk> <mask>`,
+  then amino acid × 3Di).
+- **Vocabulary check.** With 1/7 of the tokens masked in 200 proteins, the model recovers 61% of
+  the amino acids and 77% of the 3Di states, against about 5% by chance. So the token order is
+  right.
+- **Input.** The 3Di comes from `features/plm/afdb/3di.fasta`: AlphaFold-DB where available (98.7%
+  of training, 85–99% of the tests), ProstT5-predicted otherwise. Price is entirely
+  ProstT5-predicted.
+- **Features.** Mean-pooled final layer (33) and layer 24, 1,280-d. Extraction of 228,888
+  proteins took 75 min on one A6000 in fp16.
+
+**Deviation from SaProt's recipe.** SaProt masks 3Di to `#` wherever AF2 pLDDT is below 70. Our
+Foldseek AFDB database has no pLDDT, and the per-residue confidence files return 403 from this
+server. The AFDB API only gives whole-protein summaries, and the bulk Swiss-Prot archive (28.6 GB)
+downloads at about 250 KB/s (about 32 h). So the 3Di here is unmasked.
+
+**Results** (MLP head, 100 epochs; test columns are full protocol):
+
+| features | id50 | New | Price | U-all | U-multi | T-70 | T-50 | test mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ESM2-650M last (same architecture, sequence only) | 0.879 | 0.595 | 0.414 | 0.738 | 0.682 | 0.594 | 0.505 | 0.588 |
+| ProstT5 last | 0.890 | 0.602 | 0.399 | 0.733 | 0.651 | 0.590 | 0.497 | 0.579 |
+| SaProt last (2 seeds on id50) | 0.867 / 0.871 | 0.598 | 0.362 | 0.729 | 0.661 | 0.580 | 0.486 | 0.569 |
+| SaProt layer 24 | 0.875 | – | – | – | – | – | – | – |
+| SaProt last, all 3Di masked (sequence-only control) | 0.776 | 0.554 | 0.223 | 0.645 | 0.522 | 0.473 | 0.370 | 0.464 |
+| c3 (ESM2-3B ⊕ ESMC-600M ⊕ SAE-max) | 0.904 | 0.604 | 0.464 | 0.772 | 0.689 | 0.635 | 0.553 | 0.619 |
+| c3 ⊕ SaProt last | 0.904 | 0.595 | 0.454 | 0.772 | 0.719 | 0.630 | 0.549 | 0.620 |
+
+Pooled test queries by top-hit identity (full protocol, single heads):
+
+| bin (n) | no hit (95) | < 30% (608) | 30–50% (1,519) | 50–70% (707) | ≥ 70% (465) |
+|---|---:|---:|---:|---:|---:|
+| ESM2-650M | 0.372 | 0.406 | 0.552 | 0.796 | 0.837 |
+| ProstT5 | 0.277 | 0.371 | 0.558 | 0.805 | 0.835 |
+| SaProt | 0.298 | 0.395 | 0.531 | 0.802 | 0.836 |
+| SaProt, 3Di masked | 0.214 | 0.281 | 0.412 | 0.708 | 0.818 |
+
+In the id50 hybrid (six heads plus MMseqs2/Foldseek-AFDB gate, chosen 0/1/0.9):
+
+| ensemble | id50 | test mean (id50 models) |
+|---|---:|---:|
+| ens6_6b_msaf (current best) | 0.914 | 0.639 |
+| + SaProt last (7 heads) | 0.914 | 0.638 |
+| SaProt last in place of ESM2-650M | 0.914 | 0.640 |
+| + SaProt layer 24 (7 heads) | 0.913 | 0.637 |
+
+**Findings.**
+- **SaProt relies on its structure tokens, but its pooled embedding is no better than ESM2-650M's.**
+  - With 3Di masked, it drops to 0.776 on id50 and 0.464 on the tests.
+  - With 3Di, it reaches 0.867–0.871 on id50, still about 0.01 below ESM2-650M (0.879), and 0.569
+    vs 0.588 on the tests.
+  - It does not help where structure should matter most. Below 30% identity it scores 0.395 vs
+    0.406, and with no hit 0.298 vs 0.372.
+- **Price shows the train/test 3Di mismatch.** Price has only ProstT5-predicted 3Di while training
+  used AFDB 3Di, and SaProt drops to 0.362 there vs 0.414 for ESM2-650M. T-70 and T-50 also have
+  13–15% predicted 3Di.
+- **Nothing new is added.** Added to c3 or to the hybrid, SaProt ties: c3 0.620 vs 0.619; hybrid
+  0.913–0.914 on id50. The structural signal is already covered by Foldseek-AFDB homology and the
+  3B-scale sequence models.
+- **Caveats.**
+  - Missing pLDDT masking puts disordered-region 3Di, which is unreliable, into the input, so this
+    is a lower bound on SaProt. The paper's EC gains also come from fine-tuning, not frozen
+    embeddings.
+  - A fair rerun needs per-residue pLDDT, from `swissprot_pdb_v6.tar` (B-factor column) or the
+    AFDB per-protein confidence files. Then mask the AFDB 3Di below pLDDT 70, and use `#` for
+    proteins without an AFDB model.
+
+### 24. SaProt-650M-AF2 with pLDDT-masked 3Di (rerun of entry 23 with SaProt's recipe)
+
+**Change from entry 23.** The user downloaded `swissprot_pdb_v6.tar` (AFDB Swiss-Prot, 28.6 GB).
+`scripts/afdb_plddt.py` streams it without extracting and reads each model's CA B-factor column,
+which AFDB fills with pLDDT. It does this for every protein whose AFDB 3Di we already use (same
+exact-sequence rule as `afdb_3di.py`).
+- **Coverage:** 225,786 proteins, all but one of the 225,787 that use AFDB 3Di.
+- **Masking:** 3Di is replaced by `#` (SaProt's mask state) where pLDDT < 70. That is 5.9% of AFDB
+  residues: about 5% of training residues and 9–11% in the test sets. Price is unaffected, since it
+  has no AFDB models.
+- **Output:** `features/plm/afdb/plddt.npz` (per-residue pLDDT) and
+  `features/plm/afdb/3di_plddt70.fasta`.
+- **Proteins without an AFDB model** keep their ProstT5-predicted 3Di, as in entry 23, so masking
+  is the only change. Entry 23 suggested `#` for these instead. But fully masked input is a much
+  weaker embedding (0.776 id50, entry 23), so that would only hurt Price.
+- **Extraction:** `extract_plm.py --model saprot-650m --states features/plm/afdb/3di_plddt70.fasta`
+  into `features/plm/saprot-650m-plddt70`. It ran split across both A6000s with the new `--shard i/n`
+  option, in 35 min instead of 75. A 200-protein sharded vs single-GPU check agreed to 5e-4 (fp16).
+
+**Results** (same MLP head and settings as entry 23; test columns are full protocol):
+
+| features | id50 | New | Price | U-all | U-multi | T-70 | T-50 | test mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ESM2-650M last (sequence only) | 0.879 | 0.595 | 0.414 | 0.738 | 0.682 | 0.594 | 0.505 | 0.588 |
+| SaProt last, unmasked (entry 23; 2 seeds on id50) | 0.867 / 0.871 | 0.598 | 0.362 | 0.729 | 0.661 | 0.580 | 0.486 | 0.569 |
+| SaProt last, pLDDT-masked (2 seeds on id50) | 0.863 / 0.879 | 0.575 | 0.355 | 0.742 | 0.663 | 0.584 | 0.494 | 0.569 |
+| SaProt layer 24, unmasked (entry 23) | 0.875 | – | – | – | – | – | – | – |
+| SaProt layer 24, pLDDT-masked | 0.880 | – | – | – | – | – | – | – |
+| c3 (ESM2-3B ⊕ ESMC-600M ⊕ SAE-max) | 0.904 | 0.604 | 0.464 | 0.772 | 0.689 | 0.635 | 0.553 | 0.619 |
+| c3 ⊕ SaProt last, unmasked (entry 23) | 0.904 | 0.595 | 0.454 | 0.772 | 0.719 | 0.630 | 0.549 | 0.620 |
+| c3 ⊕ SaProt last, pLDDT-masked | 0.906 | 0.595 | 0.459 | 0.771 | 0.693 | 0.629 | 0.551 | 0.616 |
+
+Pooled test queries by top-hit identity (full protocol, single heads):
+
+| bin (n) | no hit (95) | < 30% (608) | 30–50% (1,519) | 50–70% (707) | ≥ 70% (465) |
+|---|---:|---:|---:|---:|---:|
+| ESM2-650M | 0.372 | 0.406 | 0.552 | 0.796 | 0.837 |
+| SaProt, unmasked | 0.298 | 0.395 | 0.531 | 0.802 | 0.836 |
+| SaProt, pLDDT-masked | 0.330 | 0.387 | 0.538 | 0.805 | 0.832 |
+
+Hybrid (homology gate fixed at the chosen 0/1/0.9):
+
+| ensemble | id50 | test mean, id50 models | full-protocol test mean |
+|---|---:|---:|---:|
+| ens6_6b_msaf (current best) | 0.914 | 0.639 | 0.638 |
+| + masked SaProt last (7 heads) | 0.914 | 0.641 | 0.637 (New 0.642, Price 0.428, U-all 0.784, U-multi 0.742, T-70 0.652, T-50 0.572) |
+| masked SaProt last in place of ESM2-650M | 0.914 | 0.639 | – |
+
+**Findings.**
+- **pLDDT masking changes nothing measurable.**
+  - Single head: full test mean 0.569 both ways. The two id50 seeds span 0.863–0.879 against
+    0.867–0.871 unmasked, i.e. within seed noise.
+  - Layer 24: 0.880 vs 0.875.
+  - Identity bins: within ±0.03, and the largest bin moves only 0.007.
+- **Still below ESM2-650M.** On sequence alone, ESM2-650M scores 0.588 on the test mean; SaProt
+  scores 0.569 with or without masking.
+- **No gain in combination.** Masked SaProt ties when added to c3 (0.616 vs 0.619) and to the
+  hybrid (0.637 vs 0.638 full; 0.641 vs 0.639 on id50 models).
+- **Why masking matters little here.** Only about 5% of training residues fall below pLDDT 70, and
+  they are mostly in disordered termini. A mean-pooled embedding is dominated by the confident
+  core, and the confident core's 3Di was already right.
+- **Conclusion.** Frozen SaProt embeddings do not help EC prediction on this benchmark, with or
+  without its pLDDT recipe. Structure already enters the best model through Foldseek-AFDB
+  homology. What's left to try for SaProt is fine-tuning (the setting of the paper's EC results),
+  not more input fixes.
+
+### 25. Best single network + homology (`hyb_c3_msaf`)
+
+The c3 head (ESM2-3B last ⊕ ESMC-600M last ⊕ ESMC-600M SAE-max, one MLP) is blended with MMseqs2 +
+Foldseek-AFDB homology through the same identity gate as the best model. The gate is grid-searched
+on id50 (lo 0–0.5, hi 0.6–1, amax 0.5–1). It picks lo 0, hi 1, amax 0.9, the same gate as
+`hyb_ens6_6b_msaf`.
+
+| model | id50 | New | Price | U-all | U-multi | T-70 | T-50 | test mean | mean without U-multi |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| c3 single head | 0.904 | 0.604 | 0.464 | 0.772 | 0.689 | 0.635 | 0.553 | 0.619 | 0.606 |
+| MMseqs2 alone | – | 0.622 | 0.385 | 0.754 | 0.684 | 0.610 | 0.514 | 0.595 | 0.577 |
+| Foldseek-AFDB alone | – | 0.630 | 0.409 | 0.761 | 0.685 | 0.624 | 0.534 | 0.607 | 0.592 |
+| **hyb_c3_msaf** (c3 + MMseqs2 + Foldseek-AFDB) | **0.916** | 0.636 | **0.440** | 0.783 | 0.716 | 0.650 | 0.570 | 0.632 | **0.616** |
+| hyb_ens6_6b_msaf (6 heads + same homology; current best) | 0.914 | **0.640** | 0.425 | **0.787** | **0.751** | **0.653** | **0.574** | **0.638** | **0.616** |
+
+Test columns are full protocol (c3 head retrained on all of split100).
+
+**Findings.**
+- **Homology adds +0.013 to c3** (0.619 → 0.632). id50 rises from 0.904 to 0.916, the highest id50
+  of any model, though only 0.002 above the six-head hybrid (seed noise about 0.003).
+- **One head with homology matches six heads with homology, except on U-multi.**
+  - The 0.006 gap in test mean comes almost entirely from U-multi: 77 proteins, each with several
+    ECs (0.716 vs 0.751).
+  - Without U-multi the five-set means are identical (0.616).
+  - c3's hybrid is better on Price (0.440 vs 0.425) and 0.003–0.004 lower on the others.
+- **Practical trade-off.** `hyb_c3_msaf` needs three embeddings (ESM2-3B, ESMC-600M, ESMC-600M
+  SAE) and one head. The six-head ensemble also needs ESMC-6B and five more heads, and buys mainly
+  better multi-EC recall. When multi-function enzymes are not the focus, `hyb_c3_msaf` is the
+  simpler model at the same accuracy.
+
+### 26. Best model on a single embedding
+
+The question: which single feature source (one PLM layer, or one SAE feature set) works best, alone
+and with homology. Two more seeds of ESM2-3B were trained so that the top single embeddings all
+have 3 seeds. Each single embedding was also blended with MMseqs2 + Foldseek-AFDB, with the gate
+grid-searched on id50 as in entry 25.
+
+Single MLP heads, mean over 3 seeds (per-seed values in brackets):
+
+| embedding | id50 | full test mean |
+|---|---:|---:|
+| **ESM2-3B last** | 0.888 (0.890 / 0.884 / 0.890) | **0.617** (0.615 / 0.613 / 0.624) |
+| ESMC-600M SAE-max | **0.891** (0.893 / 0.890 / 0.891) | 0.605 (0.604 / 0.604 / 0.606) |
+| ESMC-6B SAE-max | 0.890 (0.890 / 0.890 / 0.891) | 0.601 (0.606 / 0.604 / 0.594) |
+| ESM2-650M last | 0.878 (0.879 / 0.876 / 0.878) | 0.591 (0.588 / 0.592 / 0.594) |
+| ESMC-600M last | 0.894 (0.897 / 0.890 / 0.894) | 0.584 (0.579 / 0.585 / 0.589) |
+| ESMC-600M fine-tuned (entry 18) | 0.908 | 0.586 |
+| *c3 combination, for reference* | *0.904* | *0.619* |
+
+With homology (MMseqs2 + Foldseek-AFDB, id50-chosen gate):
+
+| model | gate (lo, hi, amax) | id50 | New | Price | U-all | U-multi | T-70 | T-50 | test mean |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ESM2-3B last + homology | 0, 0.8, 0.75 | 0.906 | 0.639 | 0.430 | 0.769 | 0.725 | 0.637 | 0.551 | 0.625 |
+| ESMC-600M SAE-max + homology | 0, 1, 0.9 | 0.911 | 0.624 | 0.433 | 0.781 | 0.720 | 0.643 | 0.560 | 0.627 |
+| *c3 + homology (entry 25)* | 0, 1, 0.9 | *0.916* | 0.636 | 0.440 | 0.783 | 0.716 | 0.650 | 0.570 | *0.632* |
+
+**Findings.**
+- **Best single embedding on the tests: ESM2-3B last.** Its 3-seed mean is 0.617, ahead of
+  ESMC-600M SAE-max (0.605) and ESMC-6B SAE-max (0.601). That margin is larger than the seed
+  spread, and it nearly matches the c3 combination (0.619).
+  - On id50 it is slightly lower (0.888 vs 0.891). id50 under-represents remote homologs, and that
+    is where ESM2-3B gains.
+  - ESMC-600M last and fine-tuned ESMC-600M lead on id50 but are among the weakest on the tests.
+- **With homology, ESM2-3B and ESMC-600M SAE-max tie** (0.625 vs 0.627 test mean). id50 would
+  pick ESMC-600M SAE-max (0.911 vs 0.906). ESM2-3B keeps an edge on New; the SAE features do
+  better on U-all, T-70 and T-50.
+- **Combining embeddings adds little alone (+0.002 for c3) but more under homology (+0.005–0.007).**
+  The best single-embedding hybrid (0.627) trails the best model (0.638) by 0.011.

@@ -30,6 +30,21 @@ Heads (``--arch``):
 
 Losses: ``bce`` (the paper's), ``asl`` (asymmetric loss, Ridnik et al. 2021: focusing on negatives
 plus a probability margin), ``focal``.
+
+Output layer (``--out``, for every head but ``linear``):
+
+- ``linear`` (default): one weight vector and bias per EC.
+- ``cosine``: ``s * cos(h, w_c) + b`` with learned weights, one shared learned scale ``s`` and bias
+  ``b``. No per-class bias, so no learned class prior.
+- ``proto``: ``s * cos(h, mu_c) + b`` where ``mu_c`` is the mean of the L2-normalized hidden vectors
+  of the training proteins of EC ``c``. ``mu_c`` is not learned: it is recomputed from the
+  current network every ``--proto-every`` steps and before evaluation; hidden vectors are centered
+  on the training mean before the cosine. A class with one training protein
+  gets a prototype as good as that protein's embedding; the network learns a metric space in which
+  proteins sit near their ECs' means.
+
+Rare-class rebalancing: ``--balance beta`` weights each training protein's loss by
+``n^-beta`` (normalized to mean 1), ``n`` = training count of its rarest EC.
 """
 
 from __future__ import annotations
@@ -136,9 +151,35 @@ def multi_hot(table: torch.Tensor, n: int) -> torch.Tensor:
 # --------------------------------------------------------------------------------------------
 
 
+ACTS = {"gelu": nn.GELU, "relu": nn.ReLU, "silu": nn.SiLU}
+
+
+class ResBlock(nn.Module):
+    """Pre-norm residual feed-forward block: x + Dropout(W2 act(W1 LN(x)))."""
+
+    def __init__(self, width: int, dropout: float, act: str, expand: int = 2) -> None:
+        super().__init__()
+        self.f = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, expand * width), ACTS[act](), nn.Dropout(dropout),
+                               nn.Linear(expand * width, width), nn.Dropout(dropout))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.f(x)
+
+
 class FeatureHead(nn.Module):
+    """Head on per-protein embedding blocks. Every block is projected to ``proj`` (Linear + LayerNorm).
+
+    - ``mlp``: concatenate, then ``layers`` x (Linear, LayerNorm, act, Dropout).
+    - ``gated``: softmax-weighted sum of the projected blocks, then the same body.
+    - ``resmlp``: concatenate, Linear to ``hidden``, ``layers`` pre-norm residual blocks (2x expansion), LayerNorm.
+    - ``blockattn``: each projected block is a token (plus a learned block embedding) next to a [CLS]
+      token; ``layers`` pre-norm Transformer encoder layers (``heads`` heads, feed-forward ``hidden``);
+      the [CLS] output is the representation.
+    - ``linear``: logistic regression on the concatenated blocks.
+    """
+
     def __init__(self, dims: list[int], n_out: int, arch: str, proj: int, hidden: int, layers: int,
-                 dropout: float, input_dropout: float, block_dropout: float) -> None:
+                 dropout: float, input_dropout: float, block_dropout: float, act: str = "gelu", heads: int = 8) -> None:
         super().__init__()
         self.arch, self.block_dropout = arch, block_dropout
         self.input_dropout = nn.Dropout(input_dropout)
@@ -146,14 +187,28 @@ class FeatureHead(nn.Module):
             self.out = nn.Linear(sum(dims), n_out)
             return
         self.proj = nn.ModuleList(nn.Sequential(nn.Linear(d, proj), nn.LayerNorm(proj)) for d in dims)
+        if arch == "blockattn":
+            self.cls = nn.Parameter(torch.zeros(1, 1, proj))
+            self.block_embedding = nn.Parameter(torch.randn(1, len(dims), proj) * 0.02)
+            layer = nn.TransformerEncoderLayer(proj, heads, hidden, dropout, activation=act if act != "silu" else F.silu,
+                                               batch_first=True, norm_first=True)
+            self.body = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+            self.norm = nn.LayerNorm(proj)
+            self.out = nn.Linear(proj, n_out)
+            return
         width = proj if arch == "gated" else proj * len(dims)
         if arch == "gated":
             self.gate = nn.Linear(proj * len(dims), len(dims))
+        if arch == "resmlp":
+            self.body = nn.Sequential(ACTS[act](), nn.Dropout(dropout), nn.Linear(width, hidden),
+                                      *[ResBlock(hidden, dropout, act) for _ in range(layers)], nn.LayerNorm(hidden))
+            self.out = nn.Linear(hidden, n_out)
+            return
         body = []
         for _ in range(layers):
-            body += [nn.Linear(width, hidden), nn.LayerNorm(hidden), nn.GELU(), nn.Dropout(dropout)]
+            body += [nn.Linear(width, hidden), nn.LayerNorm(hidden), ACTS[act](), nn.Dropout(dropout)]
             width = hidden
-        self.body = nn.Sequential(nn.GELU(), nn.Dropout(dropout), *body) if body else nn.Identity()
+        self.body = nn.Sequential(ACTS[act](), nn.Dropout(dropout), *body) if body else nn.Identity()
         self.out = nn.Linear(width, n_out)
 
     def forward(self, blocks: list[torch.Tensor], hidden: bool = False) -> torch.Tensor:
@@ -165,18 +220,62 @@ class FeatureHead(nn.Module):
             keep = (torch.rand(z[0].shape[0], len(z), device=z[0].device) > self.block_dropout).float()
             keep[keep.sum(1) == 0, torch.randint(len(z), (1,))] = 1.0  # keep at least one block
             z = [zi * keep[:, i:i + 1] * len(z) / keep.sum(1, keepdim=True) for i, zi in enumerate(z)]
-        if self.arch == "gated":
+        if self.arch == "blockattn":
+            tokens = torch.stack(z, 1) + self.block_embedding
+            tokens = torch.cat([self.cls.expand(len(tokens), -1, -1), tokens], 1)
+            h = self.norm(self.body(tokens)[:, 0])
+        elif self.arch == "gated":
             weights = torch.softmax(self.gate(torch.cat(z, 1)), dim=1)
-            h = sum(w[:, None] * zi for w, zi in zip(weights.unbind(1), z))
+            h = self.body(sum(w[:, None] * zi for w, zi in zip(weights.unbind(1), z)))
         else:
-            h = torch.cat(z, 1)
-        h = self.body(h)
+            h = self.body(torch.cat(z, 1))
         return h if hidden else self.out(h)
 
 
-def loss_fn(name: str, logits: torch.Tensor, target: torch.Tensor, smoothing: float) -> torch.Tensor:
+class CosineOut(nn.Module):
+    """``scale * cos(h, w_c) + bias``: learned (``cosine``) or class-mean (``proto``) vectors ``w_c``."""
+
+    def __init__(self, width: int, n_out: int, kind: str) -> None:
+        super().__init__()
+        self.kind = kind
+        self.log_scale = nn.Parameter(torch.tensor(math.log(16.0)))
+        self.bias = nn.Parameter(torch.tensor(-8.0))
+        if kind == "cosine":
+            self.weight = nn.Parameter(torch.randn(n_out, width) / math.sqrt(width))
+        else:
+            self.register_buffer("weight", torch.zeros(n_out, width))
+        self.register_buffer("center", torch.zeros(width))  # proto: mean training hidden vector
+        self.in_features = width
+
+    def forward(self, h: torch.Tensor) -> torch.Tensor:
+        h = F.normalize(h - self.center, dim=1)
+        return self.log_scale.exp() * h @ F.normalize(self.weight, dim=1).T + self.bias
+
+
+@torch.no_grad()
+def refresh_prototypes(model: "FeatureHead", bank, rows: torch.Tensor, table: torch.Tensor) -> None:
+    """Class means of the normalized hidden vectors of the training proteins (multi-label: each EC)."""
+    was_training = model.training
+    model.eval()
+    h = torch.cat([model(bank.batch(c), hidden=True).float() for c in rows.split(8192)])
+    center = h.mean(0)
+    h = F.normalize(h - center, dim=1)
+    model.out.center.copy_(center)
+    proto = torch.zeros_like(model.out.weight)
+    for j in range(table.shape[1]):
+        valid = table[:, j] >= 0
+        proto.index_add_(0, table[valid, j], h[valid])
+    model.out.weight.copy_(F.normalize(proto, dim=1))
+    model.train(was_training)
+
+
+def loss_fn(name: str, logits: torch.Tensor, target: torch.Tensor, smoothing: float,
+            weight: torch.Tensor | None = None) -> torch.Tensor:
     if smoothing:  # soften the positives only: 5,241 negatives would otherwise swamp the targets
         target = target * (1 - smoothing)
+    if weight is not None:  # per-protein weights (mean 1): BCE only
+        assert name == "bce"
+        return (F.binary_cross_entropy_with_logits(logits, target, reduction="none").mean(1) * weight).mean()
     if name == "bce":
         return F.binary_cross_entropy_with_logits(logits, target)
     p = torch.sigmoid(logits)
@@ -281,7 +380,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--features", nargs="+", required=True, help="<model>:<key> blocks")
     p.add_argument("--log1p", nargs="*", default=None, help="blocks to log1p (default: every *sae* block)")
     p.add_argument("--protocol", choices=["id50", "full"], required=True)
-    p.add_argument("--arch", choices=["mlp", "gated", "linear"], default="mlp")
+    p.add_argument("--arch", choices=["mlp", "gated", "resmlp", "blockattn", "linear"], default="mlp")
+    p.add_argument("--act", choices=sorted(ACTS), default="gelu")
+    p.add_argument("--heads", type=int, default=8, help="attention heads (blockattn)")
+    p.add_argument("--out", choices=["linear", "cosine", "proto"], default="linear", help="output layer")
+    p.add_argument("--proto-every", type=int, default=50, help="steps between prototype refreshes (proto)")
+    p.add_argument("--balance", type=float, default=0.0,
+                   help="weight proteins by (training count of their rarest EC)^-beta")
     p.add_argument("--proj", type=int, default=512)
     p.add_argument("--hidden", type=int, default=1024)
     p.add_argument("--layers", type=int, default=1)
@@ -342,7 +447,16 @@ def main() -> int:
     table = target_table(train_classes, args.device)
     n_out = len(classes)
     model = FeatureHead(bank.dims, n_out, args.arch, args.proj, args.hidden, args.layers, args.dropout,
-                        args.input_dropout, args.block_dropout).to(args.device)
+                        args.input_dropout, args.block_dropout, args.act, args.heads).to(args.device)
+    if args.out != "linear":
+        assert args.arch != "linear" and not args.ema
+        model.out = CosineOut(model.out.in_features, n_out, args.out).to(args.device)
+    sample_weight = None
+    if args.balance:
+        counts = np.bincount([c for cs in train_classes for c in cs], minlength=n_out)
+        rarest = np.array([min(counts[c] for c in cs) if cs else 1 for cs in train_classes], dtype=np.float64)
+        w = rarest ** -args.balance
+        sample_weight = torch.tensor(w / w.mean(), dtype=torch.float32, device=args.device)
     aux, prefix_maps = nn.ModuleList(), []
     if args.hier:  # one linear head per EC level 1-3 on the shared hidden representation
         width = model.out.in_features
@@ -374,14 +488,17 @@ def main() -> int:
         order = torch.randperm(len(rows), device=args.device)
         for step in range(steps):
             pick = order[step * args.batch_size:(step + 1) * args.batch_size]
+            if args.out == "proto" and step % args.proto_every == 0:
+                refresh_prototypes(model, bank, rows, table)
             target = multi_hot(table[pick], n_out)
+            weight = sample_weight[pick] if sample_weight is not None else None
             if args.hier:
                 h = model(bank.batch(rows[pick]), hidden=True)
-                loss = loss_fn(args.loss, model.out(h), target, args.smoothing)
+                loss = loss_fn(args.loss, model.out(h), target, args.smoothing, weight)
                 for head, m in zip(aux, prefix_maps):
                     loss = loss + args.hier * F.binary_cross_entropy_with_logits(head(h), (target @ m).clamp_max(1.0))
             else:
-                loss = loss_fn(args.loss, model(bank.batch(rows[pick])), target, args.smoothing)
+                loss = loss_fn(args.loss, model(bank.batch(rows[pick])), target, args.smoothing, weight)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -391,6 +508,8 @@ def main() -> int:
             running += loss.item()
         record = {"epoch": epoch, "loss": running / steps, "seconds": round(time.time() - t0, 1)}
         if epoch % args.eval_every == 0 or epoch == args.epochs:
+            if args.out == "proto":
+                refresh_prototypes(model, bank, rows, table)
             record["eval"] = evaluate(ema.module if ema else model, bank, eval_sets, classes)
         history.append(record)
         print(f"epoch {epoch:3d}  loss {record['loss']:.5f}  {record['seconds']:.0f}s  {summary(record.get('eval', {}))}",
