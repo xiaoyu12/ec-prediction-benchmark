@@ -22,7 +22,7 @@ hyperparameters, **on the same training and test data**.
   comparisons. Test sets are small (77–1,057 enzymes); Price in particular swings ±0.05 between
   epochs of one run.
 
-## Summary (through entry 26)
+## Summary (through entry 27)
 
 - **Best model (id50-selected):** `hyb_ens6_6b_msaf`, entry 16. It averages six MLP heads on frozen
   embeddings (ESM2-650M; ESMC-600M final layer; ESMC-600M SAE-max; ESMC-600M layer 27 ⊕ ESM2;
@@ -1017,3 +1017,80 @@ With homology (MMseqs2 + Foldseek-AFDB, id50-chosen gate):
   better on U-all, T-70 and T-50.
 - **Combining embeddings adds little alone (+0.002 for c3) but more under homology (+0.005–0.007).**
   The best single-embedding hybrid (0.627) trails the best model (0.638) by 0.011.
+
+### 27. Homology-only combinations, and every category tested against homology alone
+
+**Why.** The best hybrid gates on both MMseqs2 and Foldseek-AFDB, so a fair homology-only baseline
+should use both tools too. `scripts/homology_combo.py` combines two homology runs with no learned
+model and no parameters:
+- `best`: per query, the calls of the tool whose top hit has the higher identity;
+- `union`: every EC that either tool transfers.
+
+| model | id50 | New | Price | U-all | U-multi | T-70 | T-50 | test mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MMseqs2 (entry 3) | 0.893 | 0.622 | 0.385 | 0.754 | 0.684 | 0.610 | 0.514 | 0.595 |
+| Foldseek-AFDB (entry 16) | 0.890 | 0.630 | 0.409 | 0.761 | 0.685 | 0.624 | 0.534 | 0.607 |
+| **hom_best** (MMseqs2 + Foldseek-AFDB) | **0.897** | 0.633 | 0.386 | 0.760 | 0.696 | 0.620 | 0.528 | 0.604 |
+| hom_union | 0.894 | 0.634 | 0.407 | 0.759 | 0.692 | 0.624 | 0.534 | 0.608 |
+
+`hom_best` has the highest id50 of any homology-only method, so the protocol selects it as the
+baseline. Homology alone reaches 0.595–0.608 on the test mean.
+
+**Paired bootstrap against hom_best** (`scripts/category_bootstrap.py`, 2,000 resamples, seed-0 full
+runs; test-mean difference with 95% interval):
+
+| model | Δ test mean | 95% CI | sets with significant gain / loss |
+|---|---:|---|---|
+| ESM2-3B last | +0.011 | [−0.004, 0.027] | 0 / 0 |
+| ESMC-600M SAE-max | +0.000 | [−0.015, 0.015] | 0 / 1 (New) |
+| ProstT5 | −0.025 | [−0.041, −0.009] | 0 / 4 |
+| SaProt, pLDDT-masked | −0.035 | [−0.053, −0.017] | 0 / 4 |
+| ESMC-600M fine-tuned | −0.017 | [−0.033, −0.002] | 0 / 4 |
+| c3 head | +0.015 | [0.001, 0.028] | 2 / 1 |
+| ens6_6b (no homology) | +0.018 | [0.005, 0.031] | 1 / 0 |
+| hyb_c3_msaf | +0.029 | [0.017, 0.040] | 4 / 0 |
+| **hyb_ens6_6b_msaf** | **+0.034** | [0.025, 0.043] | 5 / 0 (all but New) |
+
+**Where each source wins** (`scripts/identity_bins.py`, `scripts/rare_eval.py`; pooled tests,
+seed-0 full runs):
+- **By identity:** at ≥50% identity, homology alone (0.846–0.854) matches the hybrid and beats every
+  PLM head. At 30–50%, homology, ESM2-3B and the ensemble are level (0.580–0.591). Below 30% and
+  with no hit, PLM heads lead.
+- **By EC frequency:** PLM heads lead on common ECs (≥200 training examples: 0.90–0.92 vs 0.84).
+  Homology leads on rare ECs (1–9 examples: 0.497 vs 0.429–0.483). The hybrid is best or tied in
+  every bin.
+
+**Conclusion.** No single PLM embedding, SAE or structure-aware PLM beats sensitive homology alone.
+Structure-aware and fine-tuned heads are significantly worse. PLM ensembles give a small gain; the
+identity-gated hybrid a clear one. Data for the manuscript (`reports/manuscript/data/`) come from
+`scripts/manuscript_data.py` and the three scripts above.
+
+### 28. Published methods against homology alone, with significance and error breakdown
+
+**What.** `scripts/bootstrap_ci.py` gained `--out` and `--dump-predictions`, so our runs can be compared
+with the published models (released MIL-BC+/MIL-CL+, retrained ESM2-BC, EnzymeHunter) on the same 2,000
+paired resamples:
+- Results: `features/logs/bootstrap_published.{json,txt}`.
+- Every model's calls: `features/predictions_published/`.
+- Breakdown by identity and EC rarity: `scripts/bins_from_predictions.py`.
+
+**Per-enzyme F1, sets significantly better / worse (95% CI):**
+
+| A − B | EnzymeHunter | MIL-CL+ | MIL-BC+ (released) | ESM2-BC (retrained) |
+|---|---|---|---|---|
+| homology only (hom_best) | 4 / 0 | 5 / 0 | 4 / 0 | 4 / 0 |
+| MMseqs2 | 4 / 0 | 5 / 0 | 3 / 0 | 2 / 0 |
+| ESM2-3B head (seed 0) | 4 / 0 | 5 / 0 | 4 / 0 | 5 / 0 |
+| six-head ensemble | 4 / 0 | 5 / 0 | 4 / 0 | 6 / 0 |
+| best hybrid (hyb_ens6_6b_msaf) | 4 / 0 | 5 / 0 | 5 / 0 | 5 / 0 |
+
+- **Micro F1:** homology alone ties ESM2-BC on every set.
+- **Support-weighted F1:** released MIL-BC+ (test mean 0.614) ranks above homology (0.602) and every
+  single model of ours except the hybrid (0.620).
+
+**Where the published methods lose** (pooled tests; per-enzyme F1):
+- **Close homologues:** at ≥50% identity they score 0.74–0.82, against 0.846–0.854 for homology.
+- **Rare ECs:** with 1–9 training examples, 0.40–0.46 against 0.497 for homology.
+- **Common ECs, by method type:** with ≥200 training examples, the classifiers ESM2-BC (0.895) and
+  MIL-BC+ (0.878) beat homology (0.838). The centroid methods do not: MIL-CL+ 0.785, EnzymeHunter 0.622.
+  This matches the prototype-layer failure in entry 22.

@@ -1,0 +1,59 @@
+{
+ "source": "python scripts/rare_eval.py --protocol full --runs hom_best_mmseqs_foldseek_afdb esm2_3b_last esmc600_saemax prostt5_last ens6_6b hyb_ens6_6b_msaf (pooled tests, seed-0 runs)",
+ "bins": [
+  "1-9",
+  "10-49",
+  "50-199",
+  ">=200"
+ ],
+ "n": [
+  1112,
+  1058,
+  718,
+  506
+ ],
+ "f1": {
+  "Homology only (MMseqs2 + Foldseek-AFDB)": [
+   0.497,
+   0.656,
+   0.67,
+   0.838
+  ],
+  "ESM2-3B (best single PLM)": [
+   0.468,
+   0.636,
+   0.717,
+   0.91
+  ],
+  "ESMC-600M SAE, max-pooled": [
+   0.464,
+   0.643,
+   0.697,
+   0.899
+  ],
+  "ProstT5 (best structure-aware PLM)": [
+   0.429,
+   0.598,
+   0.673,
+   0.915
+  ],
+  "Six-head PLM ensemble": [
+   0.483,
+   0.644,
+   0.709,
+   0.923
+  ],
+  "Six-head ensemble + homology": [
+   0.505,
+   0.674,
+   0.723,
+   0.918
+  ]
+ },
+ "hybrid_error_share": [
+  0.485,
+  0.304,
+  0.175,
+  0.037
+ ]
+}

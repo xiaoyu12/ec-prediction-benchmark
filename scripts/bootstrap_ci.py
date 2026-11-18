@@ -106,6 +106,9 @@ def main() -> int:
                              "(';'-separated); compared against the main models. Repeatable.")
     parser.add_argument("--pair", action="append", default=[], metavar="A|B",
                         help="extra paired comparison A - B between any two model names. Repeatable.")
+    parser.add_argument("--out", default=str(F / "logs/bootstrap_ci.json"), help="JSON results path")
+    parser.add_argument("--dump-predictions", metavar="DIR",
+                        help="also write each model's calls as DIR/<model>.csv (Entry, EC number)")
     args = parser.parse_args()
 
     classes = np.load(ROOT / "checkpoints/classes.npy", allow_pickle=True).astype(str)
@@ -149,6 +152,16 @@ def main() -> int:
                 raise SystemExit(f"--pair: unknown model {name!r}; known: {sorted(predictions)}")
         comparisons.append((a, b))
     labels = list(predictions)
+    if args.dump_predictions:
+        out_dir = Path(args.dump_predictions)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for lab in labels:
+            rows = {}
+            for n in tests:
+                for e, p in zip(load_entries[n], predictions[lab][n]):
+                    rows.setdefault(e, p)
+            with open(out_dir / f"{lab.replace(' ', '_')}.csv", "w") as handle:
+                handle.write("Entry,EC number\n" + "".join(f"{e},{';'.join(p)}\n" for e, p in rows.items()))
 
     rng = np.random.default_rng(args.seed)
     results: dict = {"resamples": args.resamples, "seed": args.seed, "scores": {}, "differences": {}}
@@ -189,7 +202,7 @@ def main() -> int:
                 }
         print(f"{n}: {size} enzymes", flush=True)
 
-    (F / "logs/bootstrap_ci.json").write_text(json.dumps(results, indent=1) + "\n")
+    Path(args.out).write_text(json.dumps(results, indent=1) + "\n")
     head = {"new": "New", "price": "Price", "uniprot-all": "U-all", "uniprot-multi": "U-multi", "test70": "T-70", "test50": "T-50"}
     for metric in ("sample", "micro", "weighted"):
         print(f"\n### {metric} F1, 95% CI")
