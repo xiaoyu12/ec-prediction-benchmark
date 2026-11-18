@@ -1094,3 +1094,58 @@ paired resamples:
 - **Common ECs, by method type:** with ≥200 training examples, the classifiers ESM2-BC (0.895) and
   MIL-BC+ (0.878) beat homology (0.838). The centroid methods do not: MIL-CL+ 0.785, EnzymeHunter 0.622.
   This matches the prototype-layer failure in entry 22.
+
+### 29. CLEAN, EnzHier and CLEAN-Contact re-run under the same protocol
+
+**What.** Three more published contrastive predictors were run from their released split100 models on the six test
+sets. All three call ECs by max-separation over EC centroids. Drivers are in `scripts/baselines/` (see its README);
+predictions are in `features/external/{clean,enzhier,cleancontact}_tests.csv`.
+- **CLEAN:** released `split100.pth` with its precomputed training embeddings, on ESM-1b query embeddings.
+- **EnzHier:** released `split100_triplet_withEC_7000.pth` with its released ESM-1b training embeddings. Our query
+  embeddings match those to within 4e-6.
+- **CLEAN-Contact:** released `addition` model, trained on split100_reduced (224,741 enzymes with an AFDB
+  structure, 5,197 ECs), with the authors' training representations. Each query uses ESM2-3B (2,560-d) plus a
+  ResNet-50 embedding (2,048-d) of its Cβ<8 Å contact map.
+  - Structures come from the local AFDB Swiss-Prot v6 tar (1,332 of 1,528 proteins), because direct AFDB downloads
+    return 403. The other 196 (121 RefSeq Price proteins and 75 Swiss-Prot entries missing from AFDB) use ESMFold v1.
+  - ESMFold ran through the transformers port loaded with Meta's original weights, without openfold. A control
+    protein reproduces its AFDB contacts at Jaccard 0.91. Mean pLDDT over the 196 was 0.79.
+  - Against the authors' released New-392 representations, ours match: sequence part cos > 0.9999, structure
+    part median cos 0.996 (0.990 for the ESMFold ones).
+  - A first attempt with ESM-2-predicted contact maps instead of structures was unfair to the method (Price-149 at
+    0.23) and was discarded.
+
+**Faithfulness.** The support-weighted F1 of CLEAN and EnzHier matches the MIL-BC paper (Bioinformatics 2026,
+btag804) to within 0.001 on all six sets. CLEAN-Contact matches it exactly on New, U-all and U-multi and to within
+0.003 on Test-70 and Test-50. On Price-149 it scores 0.452 against the paper's 0.478 (different predicted structures).
+
+**Per-enzyme F1** (paired bootstrap, `features/logs/bootstrap_published.{json,txt}`; earlier numbers unchanged):
+
+| model | New | Price | U-all | U-multi | T-70 | T-50 | mean | calls |
+|---|---|---|---|---|---|---|---|---|
+| CLEAN | .535 | .424 | .679 | .580 | .542 | .458 | .536 | 1.23 |
+| EnzHier | .522 | .417 | .635 | .533 | .500 | .409 | .503 | 1.25 |
+| CLEAN-Contact | .619 | .422 | .688 | .595 | .583 | .499 | .568 | 1.20 |
+| homology only | .633 | .386 | .760 | .696 | .620 | .528 | .604 | 1.39 |
+
+Sets significantly better / significantly worse (95% CI):
+
+| A − B | CLEAN | EnzHier | CLEAN-Contact |
+|---|---|---|---|
+| homology only | 5 / 0 | 5 / 0 | 3 / 0 |
+| ESM2-3B head | 5 / 0 | 5 / 0 | 4 / 0 |
+| best hybrid | 5 / 0 | 5 / 0 | 4 / 0 |
+
+- **Hierarchical loss:** EnzHier is below CLEAN, significantly on 3 sets.
+- **Structure and a larger PLM:** CLEAN-Contact is above CLEAN (+0.032), significantly on 3 sets, and is the best
+  centroid method. It is still below a plain MLP head on the same ESM2-3B embedding (0.615).
+- **Bins (pooled tests):**
+  - At ≥50% identity, published methods now span 0.70–0.82.
+  - On rare ECs (1–9 examples), 0.40–0.46.
+  - With no hit, 0.28–0.41.
+  - On ECs with ≥200 examples, all five centroid methods (0.62–0.79) fall below homology (0.838), while both
+    classifiers are above it (0.88–0.90).
+
+**Manuscript.** Updated the abstract, introduction, §2.7, Table 3, Fig. 2b, Fig. 5, the metric section,
+Discussion, Limitations, Conclusions, Methods and Table S1. `scripts/manuscript_data.py` now takes the external
+tools' scores from the bootstrap JSON and writes `data/bootstrap_published.json` itself.

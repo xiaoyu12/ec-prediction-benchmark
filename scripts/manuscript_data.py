@@ -6,8 +6,10 @@
 For each model it reads ``runs/feat/id50_<run>/metrics.json`` (id50 score) and
 ``runs/feat/full_<run>/metrics.json`` (six test sets). Models with seed replicates (``_s1``, ``_s2``)
 are averaged over seeds, and the per-seed test means are kept for the range. Published methods that
-were re-run outside ``runs/feat`` come from ``features/logs/compare_metrics.json`` and the
-EnzymeHunter bootstrap log; their id50 scores are the ones recorded in reports/AUTORESEARCH.md.
+were re-run outside ``runs/feat`` come from ``features/logs/compare_metrics.json`` (MIL-BC+, MIL-CL+, ESM2-BC)
+and ``features/logs/bootstrap_published.json`` (external tools: EnzymeHunter, CLEAN, EnzHier, CLEAN-Contact);
+their id50 scores are the ones recorded in reports/AUTORESEARCH.md. The paired differences between our models
+and the published ones are copied from the same bootstrap file into ``data/bootstrap_published.json``.
 """
 
 from __future__ import annotations
@@ -53,8 +55,21 @@ PUBLISHED = [
     ("MIL-BC+ (released)", "released MIL-BC+ | shift 0 (+0.00)", 0.868),
     ("MIL-CL+ (released)", "released MIL-CL+ | max-separation", None),
 ]
-ENZYMEHUNTER = {"new": 0.620, "price": 0.416, "uniprot-all": 0.656, "uniprot-multi": 0.596,
-                "test70": 0.539, "test50": 0.453}  # HANDOFF_MILBC.md, scored by scripts/bootstrap_ci.py
+# External tools scored by scripts/bootstrap_ci.py --external NAME=<csv>; calls are counted from the
+# uniform Entry,EC number files that its --dump-predictions writes to features/predictions_published/.
+EXTERNAL = ["EnzymeHunter", "CLEAN", "EnzHier", "CLEAN-Contact"]
+OURS = ["Homology only", "MMseqs2", "ESM2-3B", "Six-head ensemble", "Best hybrid"]
+PUBLISHED_KEYS = ["released MIL-CL+", "released MIL-BC+", "retrained ESM2-BC"] + EXTERNAL
+
+
+def calls_per_enzyme(path: Path) -> dict[str, float]:
+    import csv
+    calls = {r["Entry"]: len([e for e in (r["EC number"] or "").split(";") if e]) for r in csv.DictReader(open(path))}
+    out = {}
+    for t in TESTS:
+        rows = list(csv.DictReader(open(ROOT / "dataset" / f"{t}.csv"), delimiter="\t"))
+        out[t] = sum(calls[r["Entry"]] for r in rows) / len(rows)
+    return out
 
 
 def metrics(protocol: str, run: str) -> dict | None:
@@ -85,9 +100,23 @@ def main() -> int:
         rows.append({"category": "Published method", "name": name, "id50": id50, "id50_seeds": [],
                      "tests": sets, "test_mean": sum(sets.values()) / len(TESTS), "test_mean_seeds": [],
                      "weighted": {t: m[t]["weighted"] for t in TESTS}, "calls": {t: m[t]["calls"] for t in TESTS}})
-    rows.append({"category": "Published method", "name": "EnzymeHunter", "id50": None, "id50_seeds": [],
-                 "tests": ENZYMEHUNTER, "test_mean": sum(ENZYMEHUNTER.values()) / len(TESTS),
-                 "test_mean_seeds": [], "weighted": {}, "calls": {}})
+    boot = json.loads((ROOT / "features" / "logs" / "bootstrap_published.json").read_text())
+    for name in EXTERNAL:
+        sets = {t: boot["scores"]["sample"][name][t]["f1"] for t in TESTS}
+        rows.append({"category": "Published method", "name": name, "id50": None, "id50_seeds": [],
+                     "tests": sets, "test_mean": sum(sets.values()) / len(TESTS), "test_mean_seeds": [],
+                     "micro": {t: boot["scores"]["micro"][name][t]["f1"] for t in TESTS},
+                     "weighted": {t: boot["scores"]["weighted"][name][t]["f1"] for t in TESTS},
+                     "calls": calls_per_enzyme(ROOT / "features" / "predictions_published" / f"{name}.csv")})
+    diffs = {"source": "scripts/bootstrap_ci.py --out features/logs/bootstrap_published.json "
+                       "(2,000 paired resamples, seed 0)", "metrics": {}}
+    for metric in ("sample", "micro", "weighted"):
+        diffs["metrics"][metric] = {}
+        for a in OURS:
+            for b in PUBLISHED_KEYS:
+                v = boot["differences"][metric][f"{a} - {b}"]
+                diffs["metrics"][metric][f"{a} - {b}"] = {t: [round(v[t][k], 4) for k in ("diff", "lo", "hi")] for t in TESTS}
+    (ROOT / "reports" / "manuscript" / "data" / "bootstrap_published.json").write_text(json.dumps(diffs, indent=1) + "\n")
     # Calls per enzyme against per-enzyme and support-weighted F1, with and without the logit shift
     # chosen on id50 by weighted F1 (HANDOFF_MILBC.md, "Logit shift for the retrained models").
     calib = []

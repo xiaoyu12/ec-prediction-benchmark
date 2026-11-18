@@ -97,8 +97,8 @@ plt.close(fig)
 # ---------------------------------------------------------------- Figure 2: best of each category
 order = list(CAT)
 fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.6), sharey=True)
-for ax, key, title, lim in [(axes[0], "id50", "a  Validation (id50 fold)", (0.855, 0.945)),
-                            (axes[1], "test_mean", "b  Mean of six test sets", (0.535, 0.665))]:
+for ax, key, title, lim, flip in [(axes[0], "id50", "a  Validation (id50 fold)", (0.855, 0.945), 0.911),
+                                  (axes[1], "test_mean", "b  Mean of six test sets", (0.495, 0.665), 0.6156)]:
     for i, cat in enumerate(order):
         members = [r for r in rows if r["category"] == cat and r[key] is not None]
         if not members:
@@ -108,7 +108,7 @@ for ax, key, title, lim in [(axes[0], "id50", "a  Validation (id50 fold)", (0.85
         best = max(members, key=lambda r: r[key])
         ax.scatter([best[key]], [i], s=46, color=CAT[cat], zorder=3)
         ax.text(best[key], i - 0.36, f"{best[key]:.3f}  {best['name']}", fontsize=6.2, color=INK, va="center",
-                ha="right" if best[key] > lim[0] + 0.62 * (lim[1] - lim[0]) else "left")
+                ha="right" if best[key] > flip else "left")
     ax.axvline(HOM[key], color=CAT["Homology only"], ls=(0, (4, 3)), lw=1)
     homs = [r[key] for r in rows if r["category"] == "Homology only"]
     ax.axvspan(min(homs), max(homs), color=CAT["Homology only"], alpha=0.08, lw=0)
@@ -289,29 +289,36 @@ plt.close(fig)
 # ---------------------------------------------------------------- Figure 2: published methods vs homology
 pb = json.loads((DATA / "published_bins.json").read_text())
 pub_lines = [("Homology only", CAT["Homology only"], "-", 2.0, "o"),
-             ("ESM2-BC", "#7a7a7a", "-", 1.3, "s"),
-             ("MIL-BC+", "#7a7a7a", "--", 1.3, "^"),
-             ("MIL-CL+", "#b0b0b0", "-", 1.3, "D"),
-             ("EnzymeHunter", "#b0b0b0", ":", 1.6, "v"),
-             ("Best hybrid", CAT["PLM + homology"], "--", 1.8, "o")]
-fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.3), sharey=True)
+             ("Best hybrid", CAT["PLM + homology"], "--", 1.8, "o"),
+             ("ESM2-BC", "#6b6b6b", "-", 1.2, "s"),
+             ("MIL-BC+", "#6b6b6b", "--", 1.2, "^"),
+             ("MIL-CL+", "#ababab", "-", 1.0, "D"),
+             ("EnzymeHunter", "#ababab", ":", 1.3, "v"),
+             ("CLEAN", "#ababab", "--", 1.0, "<"),
+             ("EnzHier", "#ababab", "-.", 1.0, ">"),
+             ("CLEAN-Contact", "#ababab", (0, (1, 1)), 1.3, "P")]
+fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.7), sharey=True)
 for ax, key, title, xl in [(axes[0], "identity", "a  By top-hit identity to training", "Top-hit identity (MMseqs2 or Foldseek-AFDB)"),
                            (axes[1], "rarity", "b  By training examples of the rarest true EC", "Training examples of the query's rarest EC")]:
     bins_ = pb[key]
     xs = np.arange(len(bins_))
-    for name, c, ls, lw, mk in pub_lines:
+    for name, c, ls, lw, mk in pub_lines[::-1]:
         ys = [np.nan if (b["bin"] == "no hit" and name == "Homology only") else b["f1"][name] for b in bins_]
-        ax.plot(xs, ys, ls=ls, color=c, lw=lw, marker=mk, ms=3.5, label=name)
+        ax.plot(xs, ys, ls=ls, color=c, lw=lw, marker=mk, ms=3.2, label=name,
+                zorder=3 if name in ("Homology only", "Best hybrid") else 2)
     ax.set_xticks(xs, [f"{b['bin'].replace('>=', '≥')}\nn={b['n']:,}" for b in bins_], fontsize=6.5)
     ax.set_title(title)
     ax.set_xlabel(xl, fontsize=7)
     ax.grid(axis="y", color=GRID, lw=0.7)
     ax.set_axisbelow(True)
 axes[0].set_ylabel("Per-enzyme F1")
-axes[0].set_ylim(0.2, 0.95)
-axes[0].text(0, 0.23, "no search call", ha="center", fontsize=6, color=QUIET)
-axes[1].legend(frameon=False, fontsize=6.5, loc="upper left")
-fig.tight_layout()
+axes[0].set_ylim(0.15, 0.95)
+axes[0].text(0, 0.18, "no search call", ha="center", fontsize=6, color=QUIET)
+handles, labels_ = axes[1].get_legend_handles_labels()
+order_ = [labels_.index(n) for n, *_ in pub_lines]
+fig.legend([handles[i] for i in order_], [labels_[i] for i in order_], frameon=False, fontsize=6.5, ncol=5,
+           loc="lower center", bbox_to_anchor=(0.5, 0.0), handlelength=2.6, columnspacing=1.2)
+fig.tight_layout(rect=(0, 0.1, 1, 1))
 fig.savefig(HERE / "fig5_published.pdf")
 plt.close(fig)
 print(f"Spearman rho id50 vs test mean: {rho:.3f} over {len(pts)} models; wrote figures to {HERE}")

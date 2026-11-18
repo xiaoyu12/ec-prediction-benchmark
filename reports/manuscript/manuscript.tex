@@ -35,7 +35,8 @@
 Commission (EC) numbers, but they are rarely compared with homology transfer under identical conditions. We compared
 homology transfer by sequence (MMseqs2) and structure (Foldseek) search with classifiers on embeddings of seven PLMs,
 two of them structure-aware, on sparse-autoencoder (SAE) features and on a fine-tuned PLM, and with their
-combinations. We also re-ran four published predictors (EnzymeHunter, MIL-BC+, MIL-CL+ and ESM2-BC). All methods used
+combinations. We also re-ran seven published predictors (CLEAN, EnzHier, CLEAN-Contact, EnzymeHunter, MIL-BC+, MIL-CL+
+and ESM2-BC). All methods used
 the same 227,360 training enzymes and 5,242 EC numbers, were selected on a validation fold with at most 50\% identity
 to training, and were scored once on six public test sets (3,394 enzymes) by per-enzyme F1. Homology transfer alone
 averaged 0.604 over the test sets. The best single PLM embedding (ESM2-3B, 0.617) matched it without being
@@ -43,9 +44,9 @@ significantly better, SAE features tied it, and structure-aware PLMs (ProstT5, S
 significantly below it. Structure helped through Foldseek search, not through structure-aware embeddings. PLM
 classifiers and homology were complementary: classifiers were stronger on common ECs (0.90--0.92 vs 0.84), homology
 on rare ECs and close homologues. An identity-gated blend of six PLM heads with sequence and structure homology scored
-0.638, significantly better than homology alone on five of six sets. All four published methods (0.547--0.574) fell
-below homology alone, significantly on four or five sets each and even for queries with close training homologues,
-and below the hybrid by up to 0.16.
+0.638, significantly better than homology alone on five of six sets. All seven published methods (0.503--0.574) fell
+below homology alone, significantly on three to five sets each and even for queries with close training homologues,
+and below the hybrid by up to 0.22.
 Rankings also depended on the metric: the support-weighted F1 used in earlier benchmarks rewards over-calling and
 reverses the reported advantage of MIL-BC+ over its sequence baseline. We recommend benchmarking EC predictors
 against a sensitive homology baseline, with per-enzyme F1, calls per enzyme and paired bootstrap intervals.
@@ -75,7 +76,8 @@ convolutional networks (DeepEC \cite{deepec}), dilated residual networks (ProteI
 transformer layers combined with homology search (DeepECtransformer \cite{deepectransformer}). Most recent methods
 build on protein language model (PLM) embeddings, usually from ESM-1b or ESM2 \cite{esm1b,esm2}:
 \begin{itemize}
-  \item CLEAN learns a contrastive embedding and calls the nearest EC centroids \cite{clean}.
+  \item CLEAN learns a contrastive embedding and calls the nearest EC centroids \cite{clean}; EnzHier trains the same
+        kind of embedding with a loss that follows the EC hierarchy \cite{enzhier}.
   \item CLEAN-Contact and EnzymeHunter add contact-map features \cite{cleancontact,enzymehunter}.
   \item GraphEC applies graph networks to ESMFold structures \cite{graphec}.
   \item MIL-BC treats a protein as a bag of structural domains and classifies it by multiple-instance learning
@@ -96,7 +98,7 @@ simple homology baselines have proved hard to beat \cite{radivojac2013,zhou2019c
 learned models has helped \cite{deepgoplus}.
 
 Here we compare, under one protocol, homology transfer by sequence and structure search with classifiers on PLM
-embeddings, SAE features and structure-aware PLMs, and with combinations of the two. We also re-run four published EC
+embeddings, SAE features and structure-aware PLMs, and with combinations of the two. We also re-run seven published EC
 predictors on the same data. All methods share the training set, the EC vocabulary, the validation fold used for every
 choice, the decision rule, the metric and six test sets (Fig.~\ref{fig:design}). We ask five questions:
 \begin{enumerate}
@@ -111,8 +113,8 @@ In short, PLMs complement homology search but do not replace it. Single PLM embe
 recipe, match homology but do not beat it, and
 structure-aware embeddings fall below it; structure helps through search instead. The two kinds of evidence are
 complementary: PLMs are stronger on common ECs, homology on rare ones. Blending them, gated by the identity of the top
-homologue, gives the best predictor we found. All four published methods fall below homology transfer alone,
-significantly so on most test sets.
+homologue, gives the best predictor we found. All seven published methods we re-ran fall below homology transfer
+alone, significantly so on most test sets.
 
 Our main contributions are:
 \begin{enumerate}
@@ -126,8 +128,9 @@ Our main contributions are:
         error.
   \item \textbf{A strong, simple hybrid.} Classifier probabilities are blended with homology transfer, gated by top-hit
         identity. It is significantly better than homology alone on five of six test sets.
-  \item \textbf{A head-to-head re-evaluation of published methods.} EnzymeHunter, MIL-BC+, MIL-CL+ and ESM2-BC are
-        re-run on the same training and test sets. All four fall below homology alone, including on close homologues,
+  \item \textbf{A head-to-head re-evaluation of published methods.} CLEAN, EnzHier, CLEAN-Contact, EnzymeHunter,
+        MIL-BC+, MIL-CL+ and ESM2-BC are re-run on the same training and test sets, and the re-runs reproduce the
+        published scores of the first three. All seven fall below homology alone, including on close homologues,
         and below our hybrid on four or five sets each. We trace where and why: rare ECs, large EC classes for
         centroid-based methods, and calibration.
   \item \textbf{Negative results and a case for per-enzyme F1.} Structure-aware PLMs, model scale, head architecture,
@@ -189,8 +192,8 @@ We grouped about 180 trained models into eight categories (Supplementary Table~\
   \item \textbf{Fine-tuned PLM:} ESMC-600M with its upper half fine-tuned.
   \item \textbf{PLM combination:} several embeddings, concatenated or ensembled, without homology.
   \item \textbf{PLM + homology:} PLM heads blended with homology transfer by an identity gate.
-  \item \textbf{Published methods:} ESM2-BC and MIL-BC+ \cite{milbc}, MIL-CL+ \cite{milbc} and EnzymeHunter
-        \cite{enzymehunter}, re-run on the same test sets.
+  \item \textbf{Published methods:} CLEAN \cite{clean}, EnzHier \cite{enzhier}, CLEAN-Contact \cite{cleancontact},
+        EnzymeHunter \cite{enzymehunter}, ESM2-BC, MIL-BC+ and MIL-CL+ \cite{milbc}, re-run on the same test sets.
 \end{itemize}
 Figure~\ref{fig:categories} and Table~\ref{tab:best} compare the best model of each category on id50 and on the test
 mean. Figure~\ref{fig:vshom} tests each against homology alone with paired bootstrap intervals.
@@ -210,7 +213,7 @@ Combining the two searches without any learned model, by taking the calls of whi
 identity (``best hit''), gave the highest id50 of any homology-only method (0.897; test mean 0.604). Taking the union of
 both tools' calls gave 0.894 and 0.608. Both lie within 0.004 of Foldseek alone and are not significantly different
 from it. We use the id50-selected best-hit rule as the homology-only baseline. Homology transfer thus reaches
-0.595--0.608 on the test mean, depending on the search. That is above every published method we re-ran (0.547--0.574;
+0.595--0.608 on the test mean, depending on the search. That is above every published method we re-ran (0.503--0.574;
 Section~\ref{sec:published}).
 
 \subsection{Single PLM embeddings match homology but do not beat it}
@@ -222,7 +225,8 @@ Section~\ref{sec:published}).
 \textbf{(a)} and averaged over the six test sets \textbf{(b)}. Open circles are all models in a category; the filled
 circle is the category's best on that axis, labelled with its score and name. The dashed line is the id50-selected
 homology-only baseline (MMseqs2 + Foldseek-AFDB, best hit), and the shaded band spans all homology-only variants.
-Published methods without an id50 score (MIL-CL+, EnzymeHunter) appear only in \textbf{(b)}. Single-head scores are
+Published methods without an id50 score (MIL-CL+, EnzymeHunter, CLEAN, EnzHier, CLEAN-Contact) appear only in
+\textbf{(b)}. Single-head scores are
 three-seed means where seeds were run (Supplementary Table~\ref{tab:all}).}
 \label{fig:categories}
 \end{figure}
@@ -296,6 +300,7 @@ of each resample. Single heads are seed-0 runs.}
 \end{figure}
 
 \subsection{Structure helps through search, not through structure-aware embeddings}
+\label{sec:structure}
 
 Structural information entered the comparison in three ways. Only search helped.
 \begin{itemize}
@@ -392,47 +397,63 @@ Most published deep-learning EC predictors are built on the same kinds of PLM em
 whether they, too, fall short of homology transfer, and how they compare with our models. We re-ran published methods
 whose models could be applied to our test sets with the same EC vocabulary:
 \begin{itemize}
+  \item CLEAN \cite{clean}, EnzHier \cite{enzhier} and CLEAN-Contact \cite{cleancontact}, from their released split100
+        models. All three learn a contrastive embedding and call ECs by max-separation over EC centroids. EnzHier adds a
+        hierarchical loss; CLEAN-Contact replaces ESM-1b with ESM2-3B and adds a contact-map embedding of the
+        AlphaFold or ESMFold structure;
   \item MIL-BC+ and MIL-CL+ \cite{milbc}, from their released checkpoints;
   \item ESM2-BC, the sequence baseline of \cite{milbc}, retrained by us because no checkpoint was released;
   \item EnzymeHunter \cite{enzymehunter} v0.1.15, whose reference set is identical to split100.
 \end{itemize}
-Each was scored from its prediction files with the same metric code as our models (Table~\ref{tab:published}).
+Each was scored from its prediction files with the same metric code as our models (Table~\ref{tab:published}). The
+re-runs are faithful: under the support-weighted F1 used in \cite{milbc}, CLEAN and EnzHier matched the scores
+reported there to within 0.001 on all six sets, and CLEAN-Contact did so on New-392 and both UniProt sets.
 
-All four fell below homology transfer alone. Their test means were 0.547--0.574, against 0.604 for the homology-only
-baseline and 0.595 for MMseqs2 alone. In paired bootstrap tests, homology alone was significantly better than
-EnzymeHunter, MIL-BC+ and ESM2-BC on four test sets each and than MIL-CL+ on five, and it was never significantly worse
-on any set. Even plain MMseqs2 transfer was significantly better than each published method on two to five sets. The
-sets that did not separate were mostly Price-149, whose 149 enzymes give 95\% intervals about 0.15 wide, and, against
-EnzymeHunter, New-392.
+All seven fell below homology transfer alone. Their test means were 0.503--0.574, against 0.604 for the homology-only
+baseline and 0.595 for MMseqs2 alone. In paired bootstrap tests, homology alone was significantly better than CLEAN,
+EnzHier and MIL-CL+ on five test sets each, than EnzymeHunter, MIL-BC+ and ESM2-BC on four each and than
+CLEAN-Contact on three, and it was never significantly worse on any set. Even plain MMseqs2 transfer was significantly
+better than each published method on two to five sets. The sets that did not separate were mostly Price-149, whose 149
+enzymes give 95\% intervals about 0.15 wide, and, against EnzymeHunter and CLEAN-Contact, New-392.
 
 Our own learned models widened the gap. A single ESM2-3B head was significantly better than each published method on
-four or five sets. The best hybrid was significantly better than MIL-BC+, MIL-CL+ and ESM2-BC on five sets each and than
-EnzymeHunter on four. Against EnzymeHunter, every model of ours tied on New-392 and Price-149, the two sets inherited
-from CLEAN, and was 0.06--0.16 better on the four newer sets.
+four or five sets. The best hybrid was significantly better than CLEAN, EnzHier, MIL-BC+, MIL-CL+ and ESM2-BC on five
+sets each and than EnzymeHunter and CLEAN-Contact on four. Against these two, every model of ours tied on New-392 and
+Price-149, the two sets inherited from CLEAN, and was better on the four newer sets, by up to 0.16.
+
+The three CLEAN-family methods form a controlled series: same training set, contrastive objective and decision rule.
+\begin{itemize}
+  \item \textbf{Hierarchical loss.} EnzHier scored below CLEAN (0.503 vs 0.536), significantly on three sets.
+  \item \textbf{Larger PLM and structure.} CLEAN-Contact scored above CLEAN (0.568 vs 0.536), significantly on three
+        sets, and was the best centroid-based method. It still fell below homology alone (0.604) and below a plain MLP
+        head on the same ESM2-3B embedding without any structure (0.615), significantly on four sets. As for the
+        structure-aware PLMs (Section~\ref{sec:structure}), structure added to an embedding gained less than the
+        choice of head and decision rule.
+\end{itemize}
 
 Splitting the pooled test queries as in Fig.~\ref{fig:where} shows where the published methods fall short
 (Fig.~\ref{fig:published}). They share the weaknesses of our PLM heads, but more severely:
 \begin{itemize}
   \item \textbf{Close homologues.} At 50\% identity or more, homology transfer scored 0.846--0.854, our PLM heads
-        0.805--0.846 and the published methods 0.74--0.82. A classifier that ignores its nearest training neighbour gives up the most reliable
-        evidence available.
+        0.805--0.846 and the published methods 0.70--0.82. A classifier that ignores its nearest training neighbour gives
+        up the most reliable evidence available.
   \item \textbf{Rare ECs.} For ECs with 1--9 training examples, homology scored 0.497, our PLM heads
         0.43--0.48 and the published methods 0.40--0.46.
   \item \textbf{Large EC classes, for centroid-based methods.} On ECs with at least 200 training examples the two
-        classifiers beat homology (ESM2-BC 0.895, MIL-BC+ 0.878, homology 0.838), as our heads did (0.90--0.92), but the two contrastive,
-        centroid-based methods did not (MIL-CL+ 0.785, EnzymeHunter 0.622). One centroid cannot represent a large EC
-        class that spans unrelated families; our own prototype output layer failed the same way (Supplementary
-        Table~\ref{tab:negative}).
-  \item \textbf{No hit.} Only for the 95 queries without a homologue did the published methods (0.31--0.41) add
+        classifiers beat homology (ESM2-BC 0.895, MIL-BC+ 0.878, homology 0.838), as our heads did (0.90--0.92). All five
+        contrastive, centroid-based methods did not (0.62--0.79: EnzymeHunter 0.622, EnzHier 0.649, CLEAN 0.750,
+        MIL-CL+ 0.785, CLEAN-Contact 0.793). One centroid cannot represent a large EC class that spans unrelated
+        families; our own prototype output layer failed the same way (Supplementary Table~\ref{tab:negative}).
+  \item \textbf{No hit.} Only for the 95 queries without a homologue did the published methods (0.28--0.41) add
         something homology cannot.
 \end{itemize}
 Calibration and training recipe also matter. Released MIL-BC+ makes 1.63 calls per enzyme, more than any other method
 (1.17--1.39), which costs it precision under per-enzyme F1 (Section~\ref{sec:metric}). With the same ESM2-650M
 embedding as ESM2-BC, our head and training recipe scored 0.592 against 0.574.
 
-Other recent methods could not be placed in this comparison, including DeepECtransformer \cite{deepectransformer},
-GraphEC \cite{graphec} and CLEAN-Contact \cite{cleancontact}. Their published numbers use different training data,
-decision rules or F1 averaging, so copying them into Table~\ref{tab:published} would mix protocols and metrics.
+Other recent methods could not be placed in this comparison, including DeepECtransformer \cite{deepectransformer} and
+GraphEC \cite{graphec}. Their published numbers use different training data, decision rules or F1 averaging, so copying
+them into Table~\ref{tab:published} would mix protocols and metrics.
 
 \begin{table}[t]
 \centering\small
@@ -445,6 +466,9 @@ per-enzyme F1 (2,000 resamples). \sig\ 95\% interval excludes zero. $^{\ddagger}
 \toprule
 method & New & Price & U-all & U-multi & T-70 & T-50 & mean & micro & weighted & calls \\
 \midrule
+CLEAN & .535 & .424 & .679 & .580 & .542 & .458 & .536 & .525 & .539 & 1.23 \\
+EnzHier & .522 & .417 & .635 & .533 & .500 & .409 & .503 & .487 & .508 & 1.25 \\
+CLEAN-Contact & .619 & .422 & .688 & .595 & .583 & .499 & .568 & .551 & .557 & 1.20 \\
 EnzymeHunter & .620 & .416 & .656 & .596 & .539 & .453 & .547 & .530 & .557 & 1.29 \\
 MIL-CL+ (released) & .575 & .402 & .695 & .591 & .562 & .480 & .551 & .533 & .553 & 1.31 \\
 MIL-BC+ (released) & .560 & .397 & .713 & .684 & .578 & .500 & .572 & .545 & .614 & 1.63 \\
@@ -456,11 +480,17 @@ ESM2-3B head$^{\ddagger}$ & .629 & .418 & .758 & .719 & .624 & .540 & .615 & .61
 Six-head ensemble & .613 & .437 & .772 & .728 & .632 & .552 & .622 & .616 & .599 & 1.17 \\
 Best hybrid & \textbf{.640} & .425 & \textbf{.787} & \textbf{.751} & \textbf{.653} & \textbf{.574} & \textbf{.638} & \textbf{.625} & \textbf{.620} & 1.24 \\
 \midrule
+homology $-$ CLEAN & $+.098$\sig & $-.037$ & $+.082$\sig & $+.116$\sig & $+.078$\sig & $+.070$\sig & & & & \\
+homology $-$ EnzHier & $+.111$\sig & $-.031$ & $+.125$\sig & $+.163$\sig & $+.120$\sig & $+.119$\sig & & & & \\
+homology $-$ CLEAN-Contact & $+.013$ & $-.035$ & $+.072$\sig & $+.101$\sig & $+.038$\sig & $+.029$ & & & & \\
 homology $-$ EnzymeHunter & $+.013$ & $-.030$ & $+.104$\sig & $+.100$\sig & $+.081$\sig & $+.075$\sig & & & & \\
 homology $-$ MIL-CL+ & $+.058$\sig & $-.015$ & $+.065$\sig & $+.105$\sig & $+.058$\sig & $+.048$\sig & & & & \\
 homology $-$ MIL-BC+ & $+.073$\sig & $-.010$ & $+.047$\sig & $+.012$ & $+.042$\sig & $+.028$\sig & & & & \\
 homology $-$ ESM2-BC & $+.048$\sig & $+.019$ & $+.026$\sig & $+.029$ & $+.030$\sig & $+.026$\sig & & & & \\
 \addlinespace
+hybrid $-$ CLEAN & $+.105$\sig & $+.001$ & $+.108$\sig & $+.170$\sig & $+.110$\sig & $+.117$\sig & & & & \\
+hybrid $-$ EnzHier & $+.118$\sig & $+.008$ & $+.151$\sig & $+.217$\sig & $+.153$\sig & $+.166$\sig & & & & \\
+hybrid $-$ CLEAN-Contact & $+.020$ & $+.003$ & $+.098$\sig & $+.155$\sig & $+.070$\sig & $+.075$\sig & & & & \\
 hybrid $-$ EnzymeHunter & $+.019$ & $+.009$ & $+.130$\sig & $+.155$\sig & $+.114$\sig & $+.121$\sig & & & & \\
 hybrid $-$ MIL-CL+ & $+.065$\sig & $+.023$ & $+.091$\sig & $+.160$\sig & $+.090$\sig & $+.094$\sig & & & & \\
 hybrid $-$ MIL-BC+ & $+.080$\sig & $+.028$ & $+.074$\sig & $+.067$\sig & $+.075$\sig & $+.074$\sig & & & & \\
@@ -474,8 +504,9 @@ hybrid $-$ ESM2-BC & $+.055$\sig & $+.058$ & $+.052$\sig & $+.084$\sig & $+.062$
 \includegraphics[width=\textwidth]{fig5_published.pdf}
 \caption{\textbf{Where published methods fall short of homology.} Per-enzyme F1 on the 3,394 pooled test queries
 \textbf{(a)} by top-hit identity to training (the higher of MMseqs2 and Foldseek-AFDB) and \textbf{(b)} by the training
-count of the query's rarest true EC. Grey: published methods re-run on our test sets. Homology transfer cannot call
-when no hit is found.}
+count of the query's rarest true EC. Grey: published methods re-run on our test sets, dark for the two classifiers
+(ESM2-BC, MIL-BC+) and light for the five contrastive, centroid-based methods. Homology transfer cannot call when no
+hit is found.}
 \label{fig:published}
 \end{figure}
 
@@ -525,8 +556,8 @@ significantly better on none, and significantly worse on UniProt-all ($-0.021$).
 domain-based MIL over the sequence baseline is therefore largely a calibration effect of the metric.
 
 The comparison of published methods with homology depends on the metric too (Table~\ref{tab:published}). Under
-per-enzyme F1, homology alone beats all four. Under micro F1 it still beats MIL-CL+, EnzymeHunter and released MIL-BC+
-on three to five sets each, but ties ESM2-BC on every set. Under support-weighted F1, released MIL-BC+ (0.614) ranks
+per-enzyme F1, homology alone beats all seven. Under micro F1 it still beats CLEAN, EnzHier, MIL-CL+, EnzymeHunter and
+released MIL-BC+ on three to five sets each and CLEAN-Contact on two, but ties ESM2-BC on every set. Under support-weighted F1, released MIL-BC+ (0.614) ranks
 above homology alone (0.602), the single ESM2-3B head (0.596) and the six-head ensemble (0.599), second only to the best
 hybrid (0.620). Its extra calls are charged under the other two metrics but not under this one.
 
@@ -583,16 +614,17 @@ AlphaFold and ProstT5-predicted 3Di was small, and it was negative for Price-149
 3Di but were searched against real-structure targets.
 
 \paragraph{Published methods fall short of a homology baseline.}
-The same comparison applied to published predictors is starker. The four we could re-run, all built on PLM
-embeddings, scored below homology transfer alone, significantly so on most test sets, and below our hybrid. Three
-reasons emerge from where they fail:
+The same comparison applied to published predictors is starker. The seven we could re-run, all built on PLM
+embeddings and several also on contact maps, scored below homology transfer alone, significantly so on most test sets, and
+below our hybrid. Three reasons emerge from where they fail:
 \begin{itemize}
   \item \textbf{They do not use the nearest neighbour.} They lose most to homology where a close training homologue
         exists (at least 50\% identity) and on rare ECs, where a classifier has too few examples to learn from but a
         single homologue can still transfer the label.
-  \item \textbf{Centroids do not fit large classes.} The two contrastive methods represent each EC by one centroid,
-        which fails for large classes that span several families. EnzymeHunter scored 0.62 on ECs with at least 200
-        training examples, against 0.84 for homology and 0.88--0.92 for classifiers.
+  \item \textbf{Centroids do not fit large classes.} The five contrastive methods represent each EC by one centroid,
+        which fails for large classes that span several families. They scored 0.62--0.79 on ECs with at least 200
+        training examples, against 0.84 for homology and 0.88--0.92 for classifiers. Neither a hierarchical loss
+        (EnzHier) nor a structure embedding (CLEAN-Contact) removed this gap.
   \item \textbf{Calibration.} Released MIL-BC+ over-calls, which the support-weighted F1 used in its evaluation
         rewards.
 \end{itemize}
@@ -641,7 +673,10 @@ the other sets. We report the test mean for convenience, but significance should
 \begin{itemize}
   \item \textbf{One training set and vocabulary.} All results use split100 and its 5,242 ECs. Out-of-vocabulary ECs,
         incomplete EC numbers and non-enzymes were not considered, and EnzymeHunter was run without its
-        enzyme/non-enzyme filter.
+        enzyme/non-enzyme filter. The released CLEAN-Contact model was trained on the 98.8\% of split100 with an
+        AlphaFold structure, and 196 of its test queries used ESMFold rather than AlphaFold structures; its Price-149
+        score (0.452 support-weighted) is below the 0.478 reported with the authors' own predicted structures
+        \cite{milbc}.
   \item \textbf{Small, overlapping test sets.} Five New-392 sequences are identical to training sequences, for every
         method.
   \item \textbf{Labels taken as ground truth.} Part of the measured error is annotation change or error.
@@ -661,7 +696,7 @@ PLM embeddings complement, but do not replace, a sensitive homology search by se
 one protocol, PLM embeddings, SAE features and structure-aware PLMs on their own match but do not beat that search. The two kinds of evidence are complementary: PLM classifiers
 handle common ECs, and homology handles rare ECs and close homologues. An identity-gated blend of diverse PLM heads
 with sequence and structure search is significantly better than either alone. Structure helps through search rather
-than through embeddings. Four published deep-learning EC predictors, re-run under the same protocol, fall below
+than through embeddings. Seven published deep-learning EC predictors, re-run under the same protocol, fall below
 homology search alone, most clearly on close homologues and rare ECs, so a homology baseline belongs in every EC
 benchmark. The open problem is the remote, rare regime, which current validation folds barely measure. Progress there
 will need validation sets that resemble new annotations, by time or by EC frequency, and models that can learn an EC
@@ -813,15 +848,30 @@ heads in the main comparison were trained with three seeds where marked.
         max-separation rule \cite{clean}.
   \item \textbf{ESM2-BC} was retrained on split100 with the authors' code.
   \item \textbf{EnzymeHunter} v0.1.15 \cite{enzymehunter} was run in all-enzymes mode.
+  \item \textbf{CLEAN} \cite{clean} was run from its released split100 weights and precomputed training embeddings, on
+        ESM-1b embeddings of the queries (mean over the first 1,022 residues), with max-separation calling.
+  \item \textbf{EnzHier} \cite{enzhier} was run from its released split100 model and ESM-1b training embeddings, with
+        the same embeddings of the queries and max-separation calling. Our query embeddings matched its released
+        training embeddings for the same proteins to within $4\times10^{-6}$.
+  \item \textbf{CLEAN-Contact} \cite{cleancontact} was run from its released model (sequence and structure
+        representations added), trained by its authors on the 224,741 enzymes of split100 with an AlphaFold structure
+        (5,197 of the 5,242 ECs), with their precomputed training representations. Each query was represented as the
+        model expects: the mean ESM2-3B embedding concatenated with a ResNet-50 embedding of its C$\beta$ contact map
+        ($<8$~\AA). Structures came from AlphaFold DB (Swiss-Prot, v6) for 1,332 of the 1,528 distinct test proteins
+        and from ESMFold v1 \cite{esm2} for the other 196, mostly the RefSeq proteins of Price-149. For the New-392
+        proteins, whose representations the authors released, ours had the same sequence part (cosine similarity
+        $>0.9999$) and a structure part with median cosine similarity 0.996.
 \end{itemize}
 All were scored from their prediction files with the same metric code; paired bootstrap tests against our models
-and the identity and rarity bins of Fig.~\ref{fig:published} use the same files.
+and the identity and rarity bins of Fig.~\ref{fig:published} use the same files. As a check on the re-runs, the
+support-weighted F1 of CLEAN and EnzHier on all six test sets matched the values reported in \cite{milbc} to within
+0.001.
 
 % =====================================================================================================
 \section*{Data and code availability}
 Code for feature extraction, heads, homology transfer, ensembles, the gate, stratification and this manuscript's figures
-is in the \texttt{enzyme-sae} repository, branch \texttt{autoresearch}; all runs are logged in
-\texttt{reports/AUTORESEARCH.md}. \todo{Public repository URL and a frozen release of extracted features.} Training and
+is at \url{https://github.com/xiaoyu12/ec-prediction-benchmark}; all runs are logged in
+\texttt{reports/AUTORESEARCH.md}. \todo{A frozen release of extracted features.} Training and
 test sets are those of \cite{milbc}, available from Zenodo (\url{https://zenodo.org/records/22598911}). AlphaFold DB
 Swiss-Prot models (v6) and the Foldseek AlphaFold/Swiss-Prot database are public \cite{foldseek,afdb2022}. PLM and SAE
 weights are those released by their authors \cite{esm2,esmc,prottrans,prostt5,saprot,biohubsae}.
@@ -904,6 +954,11 @@ Lin Z, Akin H, Rao R, et al. Evolutionary-scale prediction of atomic-level prote
 \bibitem{clean}
 Yu T, Cui H, Li JC, Luo Y, Jiang G, Zhao H. Enzyme function prediction using contrastive learning. \emph{Science.}
 2023;379:1358--1363.
+
+\bibitem{enzhier} % checked (dblp: conf/isbra/DuanLWRCWLWX25)
+Duan H, Li Z, Wu Y, Ren B, Chen W, Wang F, Lan D, Wang Y, Xia LC. EnzHier: accurate enzyme function prediction through
+multi-scale feature integration and hierarchical contrastive learning. In: \emph{Bioinformatics Research and
+Applications (ISBRA 2025).} Springer; 2025:217--227.
 
 \bibitem{cleancontact} % checked
 Yang Y, Jerger A, Feng S, et al. Improved enzyme functional annotation prediction using contrastive learning with
@@ -1056,6 +1111,9 @@ model & id50 & New & Price & U-all & U-multi & T-70 & T-50 & mean \\
 \quad MIL-BC+ (released) & .868 & .560 & .397 & .713 & .684 & .578 & .500 & .572 \\
 \quad MIL-CL+ (released) & -- & .575 & .402 & .695 & .591 & .562 & .480 & .551 \\
 \quad EnzymeHunter & -- & .620 & .416 & .656 & .596 & .539 & .453 & .547 \\
+\quad CLEAN & -- & .535 & .424 & .679 & .580 & .542 & .458 & .536 \\
+\quad EnzHier & -- & .522 & .417 & .635 & .533 & .500 & .409 & .503 \\
+\quad CLEAN-Contact & -- & .619 & .422 & .688 & .595 & .583 & .499 & .568 \\
 \bottomrule
 \end{longtable}}
 
