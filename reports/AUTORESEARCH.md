@@ -1,6 +1,6 @@
 # Autoresearch: new EC-prediction models
 
-Branch `autoresearch`, started 2026-11-06. Goal: beat the existing models (ESM2-BC, MIL-BC+, the
+Branch `main` (started 2026-11-06 on `autoresearch`, merged 2026-11-18). Goal: beat the existing models (ESM2-BC, MIL-BC+, the
 domain-attention model, EnzymeHunter) on EC prediction with new features, architectures and
 hyperparameters, **on the same training and test data**.
 
