@@ -1,269 +1,192 @@
-# Enzyme EC number prediction with MIL
+# EC prediction benchmark: protein language models, structure and homology
 
-Predict EC numbers for enzyme sequences with multiple-instance learning over [DCTdomain](https://github.com/mgtools/DCTdomain) domain embeddings and ESM2.
+A head-to-head comparison of ways to predict Enzyme Commission (EC) numbers, all trained on the same data,
+selected on the same validation fold and scored once on the same six test sets:
 
-Each enzyme is a _bag_ and its structural domains are _instances_. A gated-attention pooler learns one attention distribution per enzyme and produces independent scores over a fixed vocabulary of
-**5,242 EC numbers** learned from split100. An enzyme whose true EC is outside that vocabulary can never be called correctly.
+- **Homology transfer:** by sequence (MMseqs2) and by structure (Foldseek, with ProstT5-predicted or AlphaFold DB 3Di).
+- **Classifiers on embeddings of seven PLMs:** ESM2-650M, ESM2-3B, ESMC-600M, ESMC-6B, ProtT5-XL, and two
+  structure-aware models (ProstT5, SaProt-650M).
+- **Other single models:** classifiers on sparse-autoencoder (SAE) features of ESMC, and a fine-tuned ESMC-600M.
+- **Combinations:** concatenations and ensembles of PLM heads, and identity-gated blends of PLM heads with homology.
+- **Seven published predictors, re-run under the same protocol:** CLEAN, EnzHier, CLEAN-Contact, EnzymeHunter,
+  MIL-BC+, MIL-CL+ and ESM2-BC.
+
+The manuscript is [`reports/manuscript/manuscript.pdf`](reports/manuscript/manuscript.pdf):
+*Protein language models complement, but do not replace, homology search for EC number prediction.* Every model
+that was tried, including the ones that did not help, is logged in
+[`reports/AUTORESEARCH.md`](reports/AUTORESEARCH.md).
+
+## Main results
+
+Per-enzyme F1. "id50" is the validation fold used for every choice. "Test mean" is the mean over the six test
+sets. "vs homology" counts the test sets where a method is significantly better / worse than homology alone
+(MMseqs2 + Foldseek-AFDB best hit), by paired bootstrap with 2,000 resamples.
+
+| Method | id50 | Test mean | vs homology |
+|---|---:|---:|:---:|
+| **Homology alone** (MMseqs2 + Foldseek-AFDB, best hit) | 0.897 | 0.604 | – |
+| ESM2-3B head | 0.888 | 0.617 | 0 / 0 |
+| ESMC-600M SAE features, max-pooled | 0.892 | 0.605 | 0 / 1 |
+| ProstT5 head (structure-aware) | 0.890 | 0.579 | 0 / 4 |
+| SaProt-650M head, pLDDT-masked (structure-aware) | 0.863 | 0.569 | 0 / 4 |
+| ESMC-600M, fine-tuned | 0.908 | 0.586 | 0 / 4 |
+| Six-head PLM ensemble | 0.901 | 0.622 | 1 / 0 |
+| ESM2-3B ⊕ ESMC-600M ⊕ SAE head + homology | 0.916 | 0.632 | 4 / 0 |
+| **Six-head ensemble + homology (best hybrid)** | 0.914 | **0.638** | **5 / 0** |
+| *Published, re-run:* ESM2-BC (retrained) | 0.877 | 0.574 | 0 / 4 |
+| MIL-BC+ (released) | 0.868 | 0.572 | 0 / 4 |
+| CLEAN-Contact | – | 0.568 | 0 / 3 |
+| MIL-CL+ (released) | – | 0.551 | 0 / 5 |
+| EnzymeHunter | – | 0.547 | 0 / 4 |
+| CLEAN | – | 0.536 | 0 / 5 |
+| EnzHier | – | 0.503 | 0 / 5 |
+
+What this shows:
+
+- **No PLM embedding beats homology on its own.** The best single embedding (ESM2-3B) matches homology
+  without being significantly better. SAE features tie it. Structure-aware PLMs and a fine-tuned ESMC fall
+  below it.
+- **Structure helps through search, not embeddings.** Foldseek on AlphaFold DB 3Di is as strong as MMseqs2.
+  ProstT5 and SaProt embeddings are weaker than plain ESM2.
+- **The two are complementary.** PLM classifiers are better on common ECs. Homology is better on rare ECs and
+  close homologues. Blending them by the top hit's identity gives the best model.
+- **All seven published methods fall below homology alone.** None is significantly better on any set.
+- **The metric matters.** The support-weighted F1 used in earlier benchmarks rewards calling many ECs per
+  enzyme. This benchmark reports per-enzyme F1, calls per enzyme and paired bootstrap intervals instead.
+
+## Protocol
+
+| | |
+|---|---|
+| Training | split100: 227,360 enzymes, 5,242 EC numbers (`checkpoints/classes.npy`) |
+| Model selection | `id50`: 10,422 split100 enzymes held out by 50% identity clustering, with leak-excluded neighbours removed (`scripts/folds/`) |
+| Final scores | `full`: retrain the chosen configuration on all of split100, then score each test set once |
+| Test sets | New-392, Price-149, UniProt-all (987), UniProt-multi (77), Test-70 (1,057), Test-50 (732); 3,394 enzymes |
+| Decision rule | sigmoid ≥ 0.5, at least one and at most five calls (max-separation for centroid methods, as published) |
+| Primary metric | per-enzyme F1; micro and support-weighted F1 are stored too |
+
+The training and test sets are those of MIL-BC, on [Zenodo](https://zenodo.org/records/22598911), and are
+included in `dataset/`.
+
+## Repository layout
 
 ```text
-example.csv  (Entry, EC number, Sequence)
-     |
-     |  process.py   DCTdomain -> domain vectors + mask
-     |               ESM2      -> whole-sequence embedding (1280-d)
-     v
-example.npz
-     |
-     |  infer.py     one of four models
-     v
-outputs/example_<model>.csv   (Entry, predicted_ec, n_predicted [, predicted_score])
+code/                 training, homology transfer, ensembles (run from code/ or by path)
+  extract_plm.py        pooled PLM embeddings and ESMC SAE features
+  train_feat.py         classifier heads on fixed embeddings, both protocols
+  homology.py           MMseqs2 / Foldseek EC transfer
+  ensemble.py           probability averaging and the identity-gated homology blend
+  knn_feat.py           nearest-neighbour transfer in embedding space
+  stack.py              gradient-boosted re-ranker over models and homology
+  finetune_plm.py       partial fine-tuning of ESMC-600M
+  process.py, infer.py, train.py, models.py, ...   MIL-BC family (see docs/MIL_MODELS.md)
+scripts/
+  feat.sh, extract_plm.sh   memory-capped wrappers for train_feat.py and extract_plm.py
+  bootstrap_ci.py           paired bootstrap of scores and differences, incl. external prediction files
+  stratify.py, rare_eval.py, identity_bins.py, bins_from_predictions.py   error analysis by identity and rarity
+  feat_table.py             results table from runs/feat/*/metrics.json
+  manuscript_data.py        numbers behind the manuscript's tables and figures
+  folds/                    the id50 validation fold
+  baselines/                drivers for the CLEAN, EnzHier and CLEAN-Contact re-runs
+dataset/              split100 and the six test sets
+checkpoints/          released and retrained MIL-BC family checkpoints, EC vocabulary
+reports/
+  AUTORESEARCH.md       log of every experiment
+  manuscript/           LaTeX source, figures, figure data and make_figures.py
+docs/MIL_MODELS.md    the inherited MIL-BC / MIL-CL+ / ESM2-BC code (upstream README)
 ```
 
-`train.py` takes the same archive, built from `split100.csv`, and retrains the models, including the ESM2-BC baseline.
-See [Train](#train).
+Large generated data stays out of git: `features/` (embeddings, homology databases, logs), `runs/` (one
+directory per model, with `metrics.json`, `logits.npz` and `predictions.csv`), `envs/`, `models/` and the
+AlphaFold DB tarball.
 
-## Dataset
+## Setup
 
-All the datasets are available at [Zenodo](https://zenodo.org/records/22598911).
+- **Main environment:** `uv sync` creates `.venv` from `pyproject.toml` (torch, numpy, scipy, fair-esm, faiss).
+  It runs heads, homology transfer, ensembles and scoring.
+- **Embedding environment:** `envs/esmc`, with Biohub's `esm` package and `transformers`. It is separate
+  because fair-esm also installs a package called `esm`. `extract_plm.py`, `stack.py` and the figure script
+  run here.
+- **Search tools:** MMseqs2 and Foldseek. `code/homology.py` looks for them under `~/.local/opt/`; edit
+  `MMSEQS` and `FOLDSEEK` at its top to point elsewhere.
+- **Structures:** the AlphaFold DB Swiss-Prot v6 PDB tarball (`swissprot_pdb_v6.tar`) and the Foldseek
+  `Alphafold/Swiss-Prot` database, for AFDB 3Di, pLDDT masking and CLEAN-Contact's contact maps.
 
-- training set: `dataset/split100.csv`
-- four test sets
-  - test set 1: `dataset/new.csv`
-  - test set 2: `dataset/price.csv`
-  - test set 3: `dataset/uniprot-all.csv`
-  - test set 4: `dataset/uniprot-multi.csv`
-- sequence-simlirity constrained test sets
-  - test set 5: `dataset/test70.csv`
-  - test set 6: `dataset/test50.csv`
+The wrappers in `scripts/` run jobs under `systemd-run --user --scope -p MemoryMax=...` so that a large
+job cannot exhaust host memory. Pick the GPU with `CUDA_VISIBLE_DEVICES`.
 
-| dataset       | enzymes | EC per enzyme | EC classes present (of 5,242) |
-| :------------ | ------: | ------------: | ----------------------------: |
-| NEW           |     392 |          1.28 |                           177 |
-| Price         |     149 |          1.02 |                            56 |
-| UniProt-all   |     987 |          1.09 |                           488 |
-| UniProt-multi |      77 |          2.16 |                           110 |
-| Test70        |   1,057 |          1.11 |                           492 |
-| Test50        |     732 |          1.06 |                           339 |
+## Reproducing
 
-## Models
+All proteins (split100 and the six test sets) are listed once in `features/domains/all_union.csv`
+(`Entry`, `Sequence`; 228,888 proteins). Every feature file follows its row order.
 
-| `--model`    | Checkpoint                            | Inputs                   | Decision rule            |
-| ------------ | ------------------------------------- | ------------------------ | ------------------------ |
-| `milbc`      | `checkpoints/milbc/model_v1.pth`      | domain embeddings only   | sigmoid ≥ 0.5            |
-| `milbc_plus` | `checkpoints/milbc_plus/model_v1.pth` | domain embeddings + ESM2 | sigmoid ≥ 0.5            |
-| `milcl_plus` | `checkpoints/milcl_plus/model_v2.pt`  | domain embeddings + ESM2 | CLEAN maximum separation |
-| `esm2_bc`    | `checkpoints/retrained/esm2_bc/model.pth` | ESM2 only            | sigmoid ≥ 0.5            |
-
-`milcl_plus` additionally needs `checkpoints/milcl_plus/centroids.npy`, the split100 EC centroids its projection is compared against;
-`infer.py` picks that up automatically from beside the checkpoint.
-
-`esm2_bc` is the paper's sequence-level baseline. It applies MIL-BC's classifier head to the
-whole-sequence ESM2 embedding alone, so comparing it with `milbc_plus` isolates what the bag of
-domains adds. The paper released no checkpoint for it; the one here was retrained (below).
-
-`checkpoints/retrained/<model>/` holds all four models retrained from scratch on split100 with
-`train.py` and the paper's settings (one run each, seed 0; `config.json` and `history.json` beside
-each checkpoint record the run). Use them exactly like the released ones, e.g.
-`--model milcl_plus --checkpoint ../checkpoints/retrained/milcl_plus/model.pt`. F1 on the six test
-sets (released checkpoints in parentheses):
-
-| Model        | New-392       | Price-149     | Uniprot25-all | Uniprot25-multi | Test-70       | Test-50       |
-| ------------ | ------------- | ------------- | ------------- | --------------- | ------------- | ------------- |
-| `milbc`      | 0.436 (0.518) | 0.303 (0.509) | 0.644 (0.696) | 0.481 (0.611)   | 0.484 (0.553) | 0.424 (0.499) |
-| `milbc_plus` | 0.524 (0.554) | 0.454 (0.530) | 0.727 (0.747) | 0.583 (0.689)   | 0.577 (0.611) | 0.509 (0.555) |
-| `milcl_plus` | 0.528 (0.541) | 0.442 (0.486) | 0.704 (0.698) | 0.544 (0.511)   | 0.562 (0.570) | 0.490 (0.511) |
-| `esm2_bc`    | 0.500 (0.504) | 0.394 (0.468) | 0.724 (0.712) | 0.595 (0.589)   | 0.572 (0.564) | 0.502 (0.481) |
-
-(`esm2_bc`'s parenthesised numbers are the paper's Tables 3–4.) The retrained `milbc` falls short of
-the released one by a consistent margin: three seeds agree within 0.02, and neither 200 epochs nor
-initialising the output bias to the class prior closes the gap, so the released model's recipe must
-differ in some detail the paper does not state.
-
-## Install
+**1. Embeddings.** One run per PLM; resumable, and `--shard i/n` splits a model over GPUs.
 
 ```bash
-pip install -r requirements.txt
+CUDA_VISIBLE_DEVICES=0 bash scripts/extract_plm.sh esmc-600m   # -> features/plm/esmc-600m/{last,mid,sae_mean,sae_max}.npy
+CUDA_VISIBLE_DEVICES=0 bash scripts/extract_plm.sh esm2-3b
 ```
 
-DCTdomain is bundled in `DCTdomain/`. Compile its `RecCut` domain cutter once and `process.py` refuses to start without it:
-
-```bash
-cd DCTdomain
-g++ -o src/RecCut src/RecCut.cpp
-```
-
-That is the whole setup. `process.py` runs DCTdomain in this same interpreter, so `requirements.txt`
-covers both: `torch`, `numpy` and `fair-esm` for the models, plus `scipy` and `faiss` for DCTdomain.
-(`faiss` only builds a similarity index nothing here reads, but DCTdomain imports it
-unconditionally. Conda users can `conda install -c conda-forge faiss` instead of `faiss-cpu`.)
-
-The first run downloads the ESM2 `esm2_t33_650M_UR50D` weights (2.6 GB) into the torch hub cache.
-
-## Use
-
-**1. Build features.** Input is a tab-separated table with `Entry` and `Sequence`
-columns. An `EC number` column may be present and is ignored, so this works on unannotated proteins.
+**2. Homology transfer**, for each protocol:
 
 ```bash
 cd code
-python process.py --csvdata ../example/example.csv
+python homology.py --protocol full --output-dir ../runs/feat/full_mmseqs
+python homology.py --protocol full --tool foldseek --states ../features/plm/afdb/3di.fasta \
+                   --output-dir ../runs/feat/full_foldseek_afdb      # 3Di from scripts/afdb_3di.py
 ```
 
-Writes `../example/example.npz`. Useful flags: `--output` and `--device`.
-
-**2. Predict.**
+**3. Classifier heads.** Choose on `id50`, then retrain on `full`:
 
 ```bash
-python infer.py --npzdata ../example/example.npz \
-                --model milbc_plus \
-                --checkpoint ../checkpoints/milbc_plus/model_v1.pth
+bash scripts/feat.sh id50 esm2_3b_last --features esm2-3b:last
+bash scripts/feat.sh full esm2_3b_last --features esm2-3b:last
 ```
 
-Writes `../outputs/example_milbc_plus.csv` and prints a summary:
+`train_feat.py --help` lists the head options: architecture, loss, SAE `--log1p` blocks, seeds and more.
+The arguments of each run are in `runs/feat/<run>/config.json` and in `reports/AUTORESEARCH.md`.
 
-```json
-{
-  "model": "milbc_plus",
-  "rule": "sigmoid 0.5",
-  "checkpoint": "../checkpoints/milbc_plus/model_v1.pth",
-  "enzymes": 10,
-  "classes": 5242,
-  "output": "../outputs/example_milbc_plus.csv"
-}
-```
-
-```csv
-Entry,predicted_ec,n_predicted
-A0A0H2Z7X0,2.7.7.65,1
-A0A1B3PEJ0,2.7.8.7,1
-```
-
-**3. Confidence scores (optional).** `--confscore` adds a `predicted_score` column with one score
-per called EC in the same order as `predicted_ec`:
+**4. Ensembles and the hybrid.** With `--protocol id50`, the identity gate (`lo`, `hi`, `amax`) is chosen on
+the fold. With `full`, pass the chosen values.
 
 ```bash
-python infer.py --npzdata ../example/example.npz \
-                --model milbc_plus \
-                --checkpoint ../checkpoints/milbc_plus/model_v1.pth \
-                --confscore
+python ensemble.py --protocol id50 --name hyb_ens6_6b_msaf --homology mmseqs foldseek_afdb \
+    --runs esm2_bce_e100 esmc600_last esmc600_saemax esmc600_mid_esm2 esmc600_last_saemax_esm2 esmc6b_saemax
 ```
 
-## Train
-
-`code/train.py` retrains every released model from `split100.csv` with the paper's settings, and
-writes checkpoints that `infer.py` reads unchanged. Labels come from the `EC number` column
-(`;`-separated for multifunctional enzymes), joined to the feature archive on `Entry`. The two
-split100 sequences shorter than five residues are dropped, which leaves the paper's 227,360 enzymes.
-
-**1. Build training features.** This is the same `process.py` step as for inference:
+**5. Scores, significance and error analysis.**
 
 ```bash
-cd code
-python process.py --csvdata ../dataset/split100.csv          # -> ../dataset/split100.npz
+python scripts/feat_table.py --protocol full                       # results table
+python scripts/bootstrap_ci.py --external CLEAN=features/external/clean_tests.csv ...   # paired bootstrap
+python scripts/stratify.py --hybrid hyb_ens6_6b_msaf --model ens6_6b \
+    --single esm2_3b_last_esmc600_saemax --homology mmseqs foldseek_afdb                # by top-hit identity
+python scripts/rare_eval.py --runs esm2_3b_last --protocol full                            # by EC rarity
 ```
 
-A `process.py` archive keeps every token in float64, so the full split100 archive takes about 28 GB
-of memory to load. To lower the peak, split the CSV into shards, run `process.py` on each, and pass
-all of them: `--npzdata a.npz b.npz ...`. The first time `train.py` loads an archive it writes a
-compact `<name>.compact.npz` cache beside it (about 5 GB for split100) and reads that afterwards.
+**6. Published methods.** MIL-BC+, MIL-CL+ and ESM2-BC use `code/infer.py` and `code/train.py`
+([docs/MIL_MODELS.md](docs/MIL_MODELS.md)). EnzymeHunter runs through `scripts/run_enzymehunter.sh`. CLEAN,
+EnzHier and CLEAN-Contact run from their released split100 models
+([scripts/baselines/README.md](scripts/baselines/README.md)):
+[CLEAN](https://github.com/tttianhao/CLEAN) (weights on
+[Google Drive](https://drive.google.com/file/d/1kwYd4VtzYuMvJMWXy6Vks91DSUAOcKpZ/view?usp=sharing)),
+[EnzHier](https://github.com/TangTZscut/EnzHier) (model
+[in its repository](https://github.com/TangTZscut/EnzHier/blob/main/data/model/split100_triplet_withEC_7000.pth))
+and [CLEAN-Contact](https://github.com/PNNL-CompBio/CLEAN-Contact).
 
-**2. MIL-BC, MIL-BC+ and the ESM2-BC baseline.** MIL-BC and MIL-BC+ use gated-attention MIL with
-a binary cross-entropy loss: 80 epochs, AdamW, learning rate 2e-4, weight decay 0.01, batch 512.
-ESM2-BC uses the same classifier head and the same recipe, but its only input is the ESM2 embedding.
+**7. Manuscript.**
 
 ```bash
-python train.py --model milbc      --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
-python train.py --model milbc_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
-python train.py --model esm2_bc    --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
-# -> ../runs/milbc/model.pth, ../runs/milbc_plus/model.pth, ../runs/esm2_bc/model.pth
+python scripts/manuscript_data.py                                   # -> reports/manuscript/data/*.json
+envs/esmc/bin/python reports/manuscript/make_figures.py             # -> reports/manuscript/fig*.pdf
+cd reports/manuscript && pdflatex manuscript && pdflatex manuscript && pdflatex manuscript
 ```
 
-Expect the loss to plateau for the first few thousand steps. With 5,242 independent sigmoids, the
-model first pushes every negative logit down before it separates the classes.
+## Credits
 
-**3. MIL-CL+.** This model trains in two stages, as the released checkpoint was built. The first
-stage trains the fused domain + ESM2 backbone (`MILBCPlusBackbone` in `models.py`) with BCE, using the
-same settings as step 2. The second stage refines it end to end with CLEAN's SupCon-Hard
-contrastive loss: 1,500 epochs, Adam, learning rate 5e-4, temperature 0.1. Each epoch draws one
-anchor per EC, 9 positives from that EC and 30 negatives from its 100 nearest EC centroids, and the
-negatives are re-mined every 100 epochs. The classifier BCE term stays on as a joint loss
-(`--bce-weight`, 0 to disable). At the end, `centroids.npy` is written beside `model.pt` for
-max-separation inference.
-
-```bash
-python train.py --model milcl_backbone --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv
-
-# optional, CLEAN's orphan-EC augmentation: 10 masked copies of every enzyme with a one-member EC
-python orphans.py --csvdata ../dataset/split100.csv          # -> ../dataset/split100_orphans.csv
-python process.py --csvdata ../dataset/split100_orphans.csv  # -> ../dataset/split100_orphans.npz
-
-python train.py --model milcl_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv \
-                --backbone ../runs/milcl_backbone/backbone.pth \
-                --augment-npz ../dataset/split100_orphans.npz
-# -> ../runs/milcl_plus/model.pt + centroids.npy
-```
-
-Without `--augment-npz`, an orphan EC's positive is the anchor itself, and dropout supplies the
-second view.
-
-**Validation and test sets.** `--num-folds 5 --fold k` holds out fold *k* of the training data for
-5-fold cross-validation. `--eval-set NPZ CSV`, which you can repeat, scores an independent test
-set during training. Both use the decision rule `infer.py` uses and CLEAN's support-weighted
-precision, recall and F1. The scores go to the log and to `history.json`.
-
-```bash
-python process.py --csvdata ../dataset/new.csv
-python train.py --model milbc_plus --npzdata ../dataset/split100.npz --csvdata ../dataset/split100.csv \
-                --eval-set ../dataset/new.npz ../dataset/new.csv --eval-every 5
-```
-
-Every hyperparameter can be overridden: `--epochs`, `--batch-size`, `--lr`, `--weight-decay`,
-`--n-pos`, `--n-neg`, `--temperature` and the rest; see `python train.py --help`. `--amp` turns on
-bfloat16 autocast. `--data-device cpu` keeps the feature tensors in host memory when the GPU is
-small. Each run also writes `config.json` and `history.json` to `--output-dir`, which defaults to
-`../runs/<model>`.
-
-```bash
-python infer.py --npzdata ../example/example.npz --model milbc_plus --checkpoint ../runs/milbc_plus/model.pth
-python infer.py --npzdata ../example/example.npz --model milcl_plus --checkpoint ../runs/milcl_plus/model.pt
-python infer.py --npzdata ../example/example.npz --model esm2_bc    --checkpoint ../runs/esm2_bc/model.pth
-```
-
-## Files
-
-```text
-enzyme-mil/
-├── requirements.txt
-├── code/
-│   ├── models.py                architectures for the three checkpoints + ESM2-BC
-│   ├── process.py               sequences -> feature archive
-│   ├── infer.py                 feature archive -> EC calls
-│   ├── train.py                 feature archive + EC labels -> checkpoints
-│   └── orphans.py               mutated copies of orphan-EC enzymes for MIL-CL+
-├── runs/                        where train.py writes
-├── checkpoints/
-│   ├── classes.npy              the 5,242 EC numbers, in model output order
-│   ├── milbc/model_v1.pth
-│   ├── milbc_plus/model_v1.pth
-│   ├── milcl_plus/model_v2.pt + centroids.npy
-│   └── retrained/               the four models retrained on split100 with train.py
-├── DCTdomain/                   cloned from https://github.com/mgtools/DCTdomain;
-│                                compile src/RecCut before first use
-├── example/
-│   ├── example.csv              10 enzymes with sequences and true EC numbers
-│   └── example.npz              features file, ready for infer.py
-└── outputs/                     where infer.py writes
-```
-
-## Citation
-
-- **DCTdomain** — Iovino, Tang and Ye, _Genome Research_, 2024. <https://github.com/mgtools/DCTdomain>
-- **ESM2** — Lin et al., _Science_, 2023. <https://github.com/facebookresearch/ESM>
-- **CLEAN** max-separation — Yu et al., _Science_, 2023. <https://github.com/tttianhao/CLEAN>
-
----
-
-## pretrained models
-
-[CLEAN](https://github.com/tttianhao/CLEAN) shared pretrained model on [Google Drive](https://drive.google.com/file/d/1kwYd4VtzYuMvJMWXy6Vks91DSUAOcKpZ/view?usp=sharing)
-
-[EnzHier](https://github.com/labxscut/EnzHier) shared pretrained model on [GitHub](https://github.com/TangTZscut/EnzHier/blob/main/data/model/split100_triplet_withEC_7000.pth)
+This repository started from [omics-ai/enzyme-mil](https://github.com/omics-ai/enzyme-mil), the code of
+MIL-BC ("Domain-aware enzyme classification via multiple instance learning", *Bioinformatics*,
+[btag804](https://academic.oup.com/bioinformatics/article/42/11/btag804/9006040)), which provides the
+datasets and the MIL-BC family of models. Domain segmentation uses
+[DCTdomain](https://github.com/mgtools/DCTdomain), bundled in `DCTdomain/`. The manuscript cites every
+PLM, SAE, search tool and published method used here.

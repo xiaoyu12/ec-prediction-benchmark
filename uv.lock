@@ -85,7 +85,7 @@ nvtx = [
 ]
 
 [[package]]
-name = "enzyme-sae"
+name = "ec-prediction-benchmark"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

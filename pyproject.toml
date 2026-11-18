@@ -1,7 +1,7 @@
 [project]
-name = "enzyme-sae"
+name = "ec-prediction-benchmark"
 version = "0.1.0"
-description = "Enzyme MIL / SAE models on ESM embeddings"
+description = "EC number prediction benchmark: protein language models, structure and homology search under one protocol"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

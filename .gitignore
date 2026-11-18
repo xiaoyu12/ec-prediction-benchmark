@@ -6,3 +6,5 @@ features/
 envs/
 models/
 swissprot_pdb_v6.tar
+__pycache__/
+reports/manuscript/export/
